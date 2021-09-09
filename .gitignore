@@ -17,3 +17,4 @@
 # ignore
 ./src/main/*.so
 ./src/main/mr-out-0
+.idea/
