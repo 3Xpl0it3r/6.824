@@ -1,15 +1,11 @@
 package mr
 
 import (
-	"crypto/md5"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/ioutil"
 	"os"
-	"strconv"
-	"time"
 )
 import "log"
 import "net/rpc"
@@ -43,15 +39,19 @@ func Worker(mapf func(string, string) []KeyValue,
 	var err error
 	// Your worker implementation here.
 
+	workerAddress := getWorkerIAddress()
+
+
 	for true {
-		t := CallTaskAssign()
-		if !t.Status {
-			break
+		t ,complete:= CallTaskAssign(workerAddress)
+		if complete{
+			return
 		}
+
 		if t.Kind == MapTask{
-			err = doMapWorker(&t, mapf)
+			err = doMapWorker(workerAddress,&t, mapf)
 		} else if  t.Kind == ReduceTask{
-			err = doReduceWorker(&t, reducef)
+			err = doReduceWorker(workerAddress,&t, reducef)
 			if err != nil{
 			}
 		} else {
@@ -63,17 +63,12 @@ func Worker(mapf func(string, string) []KeyValue,
 		}
 		// uncomment to send the Example RPC to the coordinator.
 		// if task complete report to coordinator
-
-		CallTaskReport(t.Id, t.Kind, err)
+		CallTaskReport(workerAddress,&t, err)
 	}
 }
 
-func workerHashId()string{
-	hash := md5.Sum([]byte(string(time.Now().UnixNano())))
-	return hex.EncodeToString(hash[:])
-}
 
-func doMapWorker(task *mapReduceTask, mapF func(string,string)[]KeyValue)error{
+func doMapWorker(workerId string,task *Task, mapF func(string,string)[]KeyValue)error{
 	fp,err := ioutil.ReadFile(task.Inputs)
 	if err != nil{
 		return err
@@ -85,8 +80,8 @@ func doMapWorker(task *mapReduceTask, mapF func(string,string)[]KeyValue)error{
   		immediate[hash] = append(immediate[hash], kv)
 	}
 	for idx, kvs := range immediate{
-		immediateFile := genImmediateFileName(int(task.Id), idx)
-		fp,err := ioutil.TempFile("", immediateFile)
+		intermediaFile := intermediateFileName(task.Id, workerId,idx)
+		fp,err := ioutil.TempFile("", intermediaFile)
 		if err != nil{
 			return err
 		}
@@ -99,29 +94,31 @@ func doMapWorker(task *mapReduceTask, mapF func(string,string)[]KeyValue)error{
 		if err := fp.Close();err != nil{
 			return err
 		}
-		if err := os.Rename(fp.Name(), immediateFile);err != nil{
+		if err := os.Rename(fp.Name(), intermediaFile);err != nil{
 			os.Remove(fp.Name())
 			return err
 		}
 	}
+	task.Intermediates = []string{intermediateFilePrefix(task.Id, workerId)}
 	return nil
 }
 
-func doReduceWorker(task *mapReduceTask, reduceF func(string, []string)string)error{
-	targets := fetchImmediateFileName(task.Targets, int(task.Id))
+func doReduceWorker(workerId string,task *Task, reduceF func(string, []string)string)error{
+	targetLocations := intermediateLocationList(task)
 	maps := make(map[string][]string)
-	for _,target := range targets{
+	for _,target := range targetLocations{
 		fp,err := os.OpenFile(target, os.O_RDONLY, 0666)
 		if err != nil{
 			return err
 		}
 		decode := json.NewDecoder(fp)
-		for {
+		for decode.More(){
 			var kv KeyValue
 			if err := decode.Decode(&kv);err != nil{
 				break
 			}
-			if _, ok := maps[kv.Key];ok {
+
+			if _, ok := maps[kv.Key];!ok {
 				maps[kv.Key] = make([]string, 0)
 			}
 			maps[kv.Key] = append(maps[kv.Key], kv.Value)
@@ -131,8 +128,8 @@ func doReduceWorker(task *mapReduceTask, reduceF func(string, []string)string)er
 	for k,v := range maps{
 		res = append(res, fmt.Sprintf("%v %v\n", k, reduceF(k, v)))
 	}
-	resultFile := genResultFileName(int(task.Id))
-	fp,err := ioutil.TempFile("",resultFile)
+	mergedFile := mergedFile(int(task.Id), workerId)
+	fp,err := ioutil.TempFile("",mergedFile)
 	defer fp.Close()
 	if err != nil{
 		return err
@@ -143,28 +140,14 @@ func doReduceWorker(task *mapReduceTask, reduceF func(string, []string)string)er
 			return err
 		}
 	}
-	if err := os.Rename(fp.Name(), resultFile);err != nil{
+	if err := os.Rename(fp.Name(), mergedFile);err != nil{
 		return err
 	}
+	task.OutputFile = mergedFile
 	return nil
 }
 
 
-func genImmediateFileName(taskId, idx int)string{
-	return fmt.Sprintf("mr-%d-%d", taskId, idx)
-}
-
-func fetchImmediateFileName(targets []string, idx int)[]string{
-	results := make([]string, 0)
-	for _, t := range targets{
-		results = append(results, "mr-"+t+"-"+strconv.Itoa(idx))
-	}
-	return results
-}
-
-func genResultFileName(reduceId int)string{
-	return fmt.Sprintf("mr-out-%d", reduceId)
-}
 
 //
 // example function to show how to make an RPC call to the coordinator.
@@ -189,52 +172,43 @@ func CallExample() {
 	fmt.Printf("reply.Y %v\n", reply.Y)
 }
 
-// mapReduceTask represent the
-type mapReduceTask struct {
-	Kind TaskKind
-	Id TaskId
-	NReduce int
-	Status bool
 
-	Inputs string
-	Targets []string
-
-}
 
 // CallRequestTask request from coordinator
-func CallTaskAssign()mapReduceTask{
-	t := mapReduceTask{}
-
-	args := TaskAssignArgs{}
-	reply := TaskAssignReply{}
+func CallTaskAssign(workerId string)(task Task,allComplete bool){
+	allComplete = false
+	args := TaskRequestArgs{
+		WorkerId: workerId,
+	}
+	reply := TaskRequestReply{}
 	call("Coordinator.TaskAssign", &args, &reply)
-	t.Kind = reply.Kind
-	t.Id = reply.Id
-	t.Inputs = reply.Inputs
-	t.Targets = reply.Targets
-	t.NReduce = reply.NumReducer
-	t.Status = reply.Status
-	return t
+	if reply.AllComplete{
+		return Task{}, true
+	}
+	task.Kind = reply.Kind
+	task.Id = reply.Id
+	task.Inputs = reply.Inputs
+	task.Intermediates = reply.Intermediates
+	task.NReduce = reply.NumReducer
+	return
 }
 
 // CallTaskHealthReport report task status to coordinator
-func CallTaskReport(taskId TaskId, taskKind TaskKind, err error){
-	args := TaskReportArgs{Id: taskId, Kind: taskKind}
+func CallTaskReport(workerId string,task *Task, err error){
+	args := TaskReportArgs{Id: task.Id, Kind: task.Kind ,WorkerId: workerId, Intermediates: task.Intermediates, MergeFile: task.OutputFile}
 	if err != nil{
-		args.Status = TaskFailed
+		args.Status = Failed
 		args.Err = err.Error()
 	}else {
-		args.Status = TaskSuccess
+		args.Status = Success
 	}
 	reply := TaskReportReply{}
 	call("Coordinator.TaskReport", &args, &reply)
+	//if reply.NeedDrop && task.Kind == ReduceTask{
+	//	os.Rename(mergedFile(int(task.Id), workerId), resultFile(int(task.Id)))
+	//}
 }
 
-
-
-func Health(){
-	// todo
-}
 
 //
 // send an RPC request to the coordinator, wFDait for the response.

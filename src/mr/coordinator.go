@@ -1,14 +1,12 @@
 package mr
 
 import (
-	"context"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"net/rpc"
 	"os"
-	"strconv"
 	"sync"
 	"time"
 )
@@ -20,6 +18,8 @@ const (
 	ReduceTaskStage Stage = "reduce"
 )
 
+const defaultTTL = 5 * time.Second
+
 type Coordinator struct {
 
 	// Your definitions here.
@@ -27,193 +27,226 @@ type Coordinator struct {
 
 	files   []string
 	nReduce int
-	nMap    int // not used
 
-	taskMtx             sync.Mutex
-	taskUnAssignedQueue []Task
-	taskProcessingQueue []Task
-	taskFinishedQueue   []Task
-	sequence            int // 用来记录任务seq ，当任务已经全部分配出去，此时有新worker进来，则将最早的task分配
+	taskMtx               sync.Mutex // 目前都是单个用户线程，理论上可以不用加锁
+	taskQueue             []*Task    // 任务队列
+	intermediateLocations []string   // 中间文件列表
+	taskCh                chan *Task // 用来传递任务
 
-	allDone  chan struct{}
-	assignCh chan Task
-
-	ctx    context.Context
-	cancel context.CancelFunc
-	once   sync.Once
-
+	// coordinate 状态
 	stageMtx sync.Mutex
 	Stage    Stage
-}
 
-// 初始化mapper task 列表
-func (c *Coordinator) initCoordinator(files []string, nReduce int) {
-	c.ctx, c.cancel = context.WithCancel(context.Background())
-	c.taskUnAssignedQueue = make([]Task, 0)
-	c.nReduce = nReduce
-	c.nMap = len(files)
-	c.allDone = make(chan struct{})
-	c.assignCh = make(chan Task)
-	c.sequence = 1
-	c.Stage = MapTaskStage
-	for i, f := range files {
-		c.taskUnAssignedQueue = append(c.taskUnAssignedQueue,
-			Task{Id: TaskId(i), Inputs: f, NumReduce: c.nReduce, Kind: MapTask, Sequence: c.sequence})
-		c.sequence += 1
-	}
-}
-
-// 初始化reducer task 列表
-func (c *Coordinator) initReduceTask() {
-	c.taskMtx.Lock()
-	defer c.taskMtx.Unlock()
-	c.taskUnAssignedQueue = c.taskUnAssignedQueue[:0]
-	c.taskFinishedQueue = c.taskFinishedQueue[:0]
-	c.taskProcessingQueue = c.taskProcessingQueue[:0]
-	intermediates := []string{}
-	for i := 0; i < c.nMap; i++ {
-		intermediates = append(intermediates, strconv.Itoa(i))
-	}
-
-	for i := 0; i < c.nReduce; i++ {
-		c.taskUnAssignedQueue = append(c.taskUnAssignedQueue, Task{
-			Id:            TaskId(i),
-			Kind:          ReduceTask,
-			Inputs:        "",
-			NumReduce:     c.nMap,
-			Intermediates: intermediates,
-		})
-	}
+	// 控制coordinator 退出
+	allDone chan struct{}
 }
 
 func (c *Coordinator) main() {
 	defer func() {
-		close(c.assignCh)
+		close(c.taskCh)
 		close(c.allDone)
 	}()
-LOOP:
+Finish:
 	for true {
-		stage := c.getStage()
-		switch stage {
+		select {
+		default:
+			c.healthCheck()
+		}
+		switch c.getStage() {
 		case MapTaskStage:
-			if c.taskIsComplete() {
-				c.updateStage(ReduceTaskStage)
-				c.initReduceTask()
-				continue
+			if c.isAllFinished(MapTaskStage) {
+				c.switchStage(MapTaskStage, ReduceTaskStage)
 			}
-			task, _ := c.getTask(c.nMap)
-			c.assignCh <- task
+			if task, ok := c.getTask(); ok {
+				c.taskCh <- task
+			}
 		case ReduceTaskStage:
-			if c.taskIsComplete() {
-				break LOOP
+			if c.isAllFinished(ReduceTaskStage) {
+				time.Sleep(1 * time.Second)
+				break Finish
 			}
-			task, _ := c.getTask(c.nReduce)
-			c.assignCh <- task
+			if task, ok := c.getTask(); ok {
+				c.taskCh <- task
+			}
 		}
 		time.Sleep(1 * time.Second)
 	}
 }
 
-func (c *Coordinator) taskIsComplete() bool {
+func (c *Coordinator) initCoordinator(files []string, nReduce int) {
+	c.files = files
+	c.nReduce = nReduce
+	// init some fields about map
+	c.taskMtx = sync.Mutex{}
+	c.initMapperTask()
+	c.intermediateLocations = make([]string, 0)
+	c.taskCh = make(chan *Task)
+	// init some fields about stage
+	c.stageMtx = sync.Mutex{}
+	c.Stage = MapTaskStage
+	//
+	c.allDone = make(chan struct{})
+}
+
+// 初始化map task
+func (c *Coordinator) initMapperTask() {
 	c.taskMtx.Lock()
 	defer c.taskMtx.Unlock()
-	stage := c.getStage()
+	c.taskQueue = make([]*Task, 0)
+	for idx := 0; idx < len(c.files); idx++ {
+		c.taskQueue = append(c.taskQueue, &Task{
+			Id:            TaskId(idx),
+			Kind: MapTask,
+			Inputs:        c.files[idx],
+			NReduce:       c.nReduce,
+			Intermediates: nil,
+			Status:        UnAssigned,
+			CreateAt:       time.Now(),
+		})
+	}
+}
+
+// 初始化reduce task
+func (c *Coordinator) initReducerTask() {
+	c.taskMtx.Lock()
+	defer c.taskMtx.Unlock()
+	c.taskQueue = c.taskQueue[:0]
+	for idx := 0; idx < c.nReduce; idx++ {
+		c.taskQueue = append(c.taskQueue, &Task{
+			Id:            TaskId(idx),
+			Inputs:        "",
+			NReduce:       c.nReduce,
+			Intermediates: c.intermediateLocations,
+			Status:        UnAssigned,
+			Kind: ReduceTask,
+			CreateAt:       time.Now(),
+		})
+	}
+}
+
+// 任务是否完成
+func (c *Coordinator) isAllFinished(stage Stage) bool {
+	c.taskMtx.Lock()
+	defer c.taskMtx.Unlock()
+	allFinished := 0
+	for _, task := range c.taskQueue {
+		if task.Status == Finished {
+			allFinished += 1
+		}
+	}
 	if stage == MapTaskStage {
-		return len(c.taskFinishedQueue) == c.nMap
-	} else if stage == ReduceTaskStage {
-		return len(c.taskFinishedQueue) == c.nReduce
-	} else {
-		return false
+		return allFinished == len(c.files)
 	}
+	return allFinished == c.nReduce
 }
 
-// getTask get task
-// 如果unAssigned队列不为空，则从unAssigned里面直接返回一个seq最小的
-// 如果unAssigned队列为空&proces队列不为空，此时仍然有worker进来请求，获取seq最小的那个，
-func (c *Coordinator) getTask(totalTask int) (task Task,ok bool) {
+// 调度task
+func (c *Coordinator) getTask() (*Task, bool) {
 	c.taskMtx.Lock()
 	defer c.taskMtx.Unlock()
-	if len(c.taskFinishedQueue) == totalTask {
-		return Task{}, false
+	for _, t := range c.taskQueue {
+		if t.Status == UnAssigned {
+			t.Status = Assigned
+			t.CreateAt = time.Now()
+			return t, true
+		}
 	}
-	ok = true
-	// taskUnAssignedQueue is not empty
-	if len(c.taskUnAssignedQueue) != 0 {
-		task = c.taskUnAssignedQueue[0]
-		c.taskUnAssignedQueue = append(c.taskUnAssignedQueue[:0], c.taskUnAssignedQueue[1:]...)
-		c.taskProcessingQueue = append(c.taskProcessingQueue, task)
-		return
-	}
-
-	if len(c.taskProcessingQueue) == 0{
-		ok = false
-		return Task{}, false
-	}
-	// taskUnAssignedQueue is empty,but taskProcessing is not empty
-	// pick up the oldest task from taskProcessing , we assume the worker that processing this task is dead
-	task = c.taskProcessingQueue[0]
-	task.Sequence += 1
-	c.taskProcessingQueue = append(c.taskProcessingQueue[:0], c.taskProcessingQueue[1:]...)
-	c.taskProcessingQueue = append(c.taskProcessingQueue, task)
-	return
-
+	return nil, false
 }
 
-// updateTaskList
-// if task has complete then put it to taskSuccessfully list
-// if task failed then put it re back to taskUnAssigned list
-func (c *Coordinator) updateTaskList(id TaskId, complete bool) {
+// 更新任务列表
+func (c *Coordinator) updateTask(task *Task) bool {
 	c.taskMtx.Lock()
 	defer c.taskMtx.Unlock()
-	var task Task
-	for i, t := range c.taskProcessingQueue {
-		if t.Id == id && t.Sequence == t.Sequence {
-			task = c.taskProcessingQueue[i]
-			c.taskProcessingQueue = append(c.taskProcessingQueue[:i], c.taskProcessingQueue[i+1:]...)
+	for _, t := range c.taskQueue {
+		if t.Id == task.Id {
+			if t.Status == Finished{
+				return true
+			} else {
+				t.Status = task.Status
+			}
 			break
 		}
 	}
-	if complete {
-		c.taskFinishedQueue = append(c.taskFinishedQueue, task)
-	} else {
-		c.taskUnAssignedQueue = append(c.taskUnAssignedQueue, task)
+
+	if task.Status == Finished && task.Kind == MapTask {
+		c.intermediateLocations = append(c.intermediateLocations, task.Intermediates...)
 	}
+	return false
 }
 
+// 获取当前stage
 func (c *Coordinator) getStage() Stage {
 	c.stageMtx.Lock()
 	defer c.stageMtx.Unlock()
 	return c.Stage
 }
 
-func (c *Coordinator) updateStage(stage Stage) {
+//  状态切换
+func (c *Coordinator) switchStage(from, to Stage) {
 	c.stageMtx.Lock()
 	defer c.stageMtx.Unlock()
-	c.Stage = stage
+	if from == to {
+		return
+	}
+	if from == MapTaskStage && to == ReduceTaskStage {
+		c.Stage = to
+		c.initReducerTask()
+	}
+}
+
+// 健康检查
+func (c *Coordinator) healthCheck() {
+	c.taskMtx.Lock()
+	defer c.taskMtx.Unlock()
+	for _, task := range c.taskQueue {
+		if task.Status == Finished{
+			continue
+		}
+		if time.Now().Sub(task.CreateAt) > defaultTTL {
+			task.Status = UnAssigned
+		}
+	}
 }
 
 // Your code here -- RPC handlers for the worker to call.
-// TaskScheduler is used for assign task for worker
-func (c *Coordinator) TaskAssign(args *TaskAssignArgs, reply *TaskAssignReply) error {
-	task, ok := <-c.assignCh
-	if !ok {
-		reply.Status = false
+// TaskScheduler is used for assign taskCh for worker
+func (c *Coordinator) TaskAssign(args *TaskRequestArgs, reply *TaskRequestReply) error {
+	//fmt.Fprintf(os.Stdout, "[%s] require worker......\n", args.WorkerId)
+	task := <-c.taskCh
+
+
+	reply.AllComplete = false
+	if task == nil {
+		reply.AllComplete = true
 		return nil
 	}
-	reply.Targets = task.Intermediates
-	reply.Status = true
-	reply.NumReducer = c.nReduce
-	reply.Kind = task.Kind
 	reply.Id = task.Id
+	reply.Kind = task.Kind
+	reply.Intermediates = task.Intermediates
 	reply.Inputs = task.Inputs
+	reply.NumReducer = task.NReduce
+	//fmt.Fprintf(os.Stdout, "-->[%s] get taskCh Id: [%d]  Kind: [%s]\n", args.WorkerId, task.Id, task.Kind)
 	return nil
 }
 
 func (c *Coordinator) TaskReport(args *TaskReportArgs, reply *TaskReportReply) error {
-	var complete bool = args.Status == TaskSuccess
-	c.updateTaskList(args.Id, complete)
+	var task Task
+	task.Kind = args.Kind
+	if args.Status == Failed {
+		task.Status = UnAssigned
+	} else {
+		task.Status = Finished
+	}
+	task.Id = args.Id
+	task.Intermediates = args.Intermediates
+	reply.NeedDrop = c.updateTask(&task)
+	if reply.NeedDrop && args.Kind == ReduceTask{
+		os.Remove(args.MergeFile)
+	}
 	return nil
 }
+
 
 //
 // an example RPC handler.
@@ -247,9 +280,6 @@ func (c *Coordinator) server() {
 // if the entire job has finished.
 //
 func (c *Coordinator) Done() bool {
-	defer func() {
-		c.cancel()
-	}()
 	<-c.allDone
 	// Your code here.
 	return true

@@ -34,8 +34,9 @@ failed_any=0
 # first word-count
 
 # generate the correct output
+../mrsequential ../../mrapps/wc.so ../pg*txt || exit 1
+sort mr-out-0 > mr-correct-wc.txt
 rm -f mr-out*
-
 
 #########################################################
 echo '***' Starting crash test.
@@ -47,15 +48,12 @@ rm -f mr-out*
 
 rm -f mr-done
 (timeout -k 2s 180s ../mrcoordinator ../pg*txt ; touch mr-done ) &
-echo "it will sleep 1 seconds"
 sleep 1
 
 # start multiple workers
-echo "# start multiple workers"
 timeout -k 2s 180s ../mrworker ../../mrapps/crash.so &
 
 # mimic rpc.go's coordinatorSock()
-echo "# mimic rpc.go's coordinatorSock()"
 SOCKNAME=/var/tmp/824-mr-`id -u`
 
 ( while [ -e $SOCKNAME -a ! -f mr-done ]
@@ -77,7 +75,6 @@ do
 done
 
 wait
-echo "wait complete!!!"
 
 rm $SOCKNAME
 sort mr-out* | grep . > mr-crash-all
