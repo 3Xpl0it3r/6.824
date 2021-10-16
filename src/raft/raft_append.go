@@ -12,7 +12,6 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term    int 		// currentTerm, for leader to update itself
 	Success bool		// true if follower contained entry matching prevLogIndex and  prevLogTerm
-	From int
 }
 
 
@@ -23,7 +22,6 @@ func(rf *Raft)AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply){
 	}()
 	reply.Success = false
 	reply.Term = rf.currentTerm
-	reply.From = rf.me
 	if args.Term < rf.currentTerm{
 		return
 	}

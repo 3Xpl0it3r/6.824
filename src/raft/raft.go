@@ -192,7 +192,6 @@ type RequestVoteReply struct {
 	// Your data here (2A).
 	Term        int
 	VoteGranted bool
-	From        int
 }
 
 //
@@ -206,7 +205,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}()
 	reply.Term = rf.currentTerm
 	reply.VoteGranted = false
-	reply.From = rf.me
 	if args.Term < rf.currentTerm {
 		return
 	}
@@ -316,12 +314,6 @@ func (rf *Raft) ticker() {
 		// Your code here to check if a leader election should
 		// be started and to randomize sleeping time using
 		// time.Sleep().
-
-		select {
-		case <-rf.ctx.Done():
-			return
-		default:
-		}
 
 		switch rf.getServerState() {
 		case Leader:

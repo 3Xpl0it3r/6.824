@@ -67,7 +67,6 @@ func(rf *Raft)wrapSendRequestVote(wg *sync.WaitGroup, voteNums *int32,server int
 		rf.mu.Lock()
 		if atomic.LoadInt32(voteNums) > int32(len(rf.peers) >> 1) {
 			rf.convertToLeader()
-			rf.heartbeatCh <- struct{}{}
 		}
 		rf.mu.Unlock()
 	}
