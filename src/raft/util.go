@@ -2,7 +2,6 @@ package raft
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"math/rand"
 	"time"
@@ -19,13 +18,6 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 }
 
 
-func (rf *Raft)DPrintf(stage string, format string, a ...interface{})(n int,err error){
-	format = fmt.Sprintf("%.24s Stag: %.24s\t Term: %d\tServer: %d\t State: %s\t%s\n", time.Now().String(),stage, rf.currentTerm, rf.me, rf.serverState, format)
-	if Debug{
-		fmt.Printf(format, a...)
-	}
-	return 0, err
-}
 
 
 func(rf *Raft)getServerState()ServerState{
@@ -42,7 +34,11 @@ func (rf *Raft) resetTimer() {
 	rand.Seed(time.Now().UnixNano())
 	// for limit heartbeat will be triggered 10 times peer second, so the electionTimeout should be larger than 150-300ms
 	rf.electionTimeout = time.Duration(rand.Int63n(200)+ 300) * time.Millisecond
+}
 
+
+func(rf *Raft)resetHeartBeat(){
+	rf.lastRecordTime = time.Now()
 }
 
 // start goroutine attach an context
@@ -69,12 +65,63 @@ func(rf *Raft)convertToFollower(newTerm int){
 // convert to leader
 func(rf *Raft)convertToLeader(){
 	rf.serverState = Leader
+	// Figure2, Volatile state on leader ,Reinitialized after election
+	for server, _ := range rf.peers{
+		rf.nextIndex[server] = len(rf.log) + 1
+		rf.matchIndex[server] = 0
+	}
+	rf.matchIndex[rf.me] = len(rf.log)
+
 }
 
-// convert to candidate, when converto to candidate shoule inc current term, reset timer,
-func(rf *Raft)convertToCandidate(){
-	rf.currentTerm += 1
+// convert to candidate, when convert to candidate shoule inc current term, reset timer,
+func(rf *Raft)convertToCandidate() {
+	oldTerm := rf.currentTerm
 	rf.serverState = Candidate
+	rf.currentTerm ++
 	rf.voteFor = rf.me
 	rf.resetTimer()
+	DebugPrint(dTimer, "S%d Cvt Candidate|RST ELT(ELT Timeout)| T%d -> T%d", rf.me, oldTerm,rf.currentTerm)
 }
+
+
+// Figure2.
+func (rf *Raft)applyLogToStateMachine(){
+	DebugPrint(dApply, "S%d Apply To StateMachine CMI %d LAI %d\n", rf.me, rf.commitIndex, rf.lastApplied)
+	if rf.commitIndex > rf.lastApplied {
+		rf.lastApplied ++
+		rf.applyCh <- ApplyMsg{
+			CommandValid:  true,
+			Command:       rf.log[rf.lastApplied-1].Command,
+			CommandIndex:  rf.lastApplied,
+			SnapshotValid: false,
+			Snapshot:      nil,
+			SnapshotTerm:  0,
+			SnapshotIndex: 0,
+		}
+	}
+}
+
+// Figure2. Rules for leader
+func (rf *Raft)updateCommitIndex(){
+	// if existed an N, such that N > commitIndex, a majority of matchIndex[i] >= N ,and log[N].Term == currentTerm;
+	// set commitIndex = N
+
+	for N := rf.commitIndex + 1; N <= len(rf.log) ; N ++ {
+		var count = 0
+		for _,mix := range rf.matchIndex {
+			if mix >= N && rf.log[N-1].Term == rf.currentTerm{
+				count ++
+			}
+			if count > len(rf.peers) >> 1 {
+				prevCMI := rf.commitIndex
+				rf.commitIndex = N
+				DebugPrint(dCommit, "S%d CMI Updated %d -> %d",rf.me,  prevCMI, rf.commitIndex)
+				break
+			}
+		}
+	}
+}
+
+
+

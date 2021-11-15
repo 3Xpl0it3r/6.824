@@ -12,117 +12,80 @@ const (
 
 func (rf *Raft) doElection(ctx context.Context) {
 	var (
-		wg *sync.WaitGroup = &sync.WaitGroup{}
-		voteNums int32 = 0
+		wg       *sync.WaitGroup = &sync.WaitGroup{}
+		voteNums int32           = 0
 	)
 	defer func() {
 		rf.wg.Done()
 	}()
 	select {
-	case <- rf.ctx.Done():
+	case <-rf.ctx.Done():
 		return
 	default:
 	}
 	rf.mu.Lock()
-	if rf.serverState == Leader{
+
+	if rf.serverState == Leader {
 		rf.mu.Unlock()
 		return
 	}
 	rf.convertToCandidate()
-	voteNums+=1
+	voteNums += 1
 	args := RequestVoteArgs{
-		Term:         rf.currentTerm,
-		CandidateId:  rf.me,
+		Term:        rf.currentTerm,
+		CandidateId: rf.me,
+		LastLogIndex: len(rf.log),
 	}
+	if len(rf.log) == 0{
+		args.LastLogTerm = -1
+	}else {
+		args.LastLogTerm = rf.log[args.LastLogIndex-1].Term
+	}
+
 	rf.mu.Unlock()
-	for server, _ := range rf.peers{
-		if server == rf.me{
+	for server, _ := range rf.peers {
+		if server == rf.me {
 			continue
 		}
 		wg.Add(1)
 		go rf.wrapSendRequestVote(wg, &voteNums, server, &args)
 	}
 	wg.Wait()
+
 }
 
-func(rf *Raft)wrapSendRequestVote(wg *sync.WaitGroup, voteNums *int32,server int, args *RequestVoteArgs){
+
+func (rf *Raft) wrapSendRequestVote(wg *sync.WaitGroup, voteNums *int32, server int, args *RequestVoteArgs) {
 	defer func() {
 		wg.Done()
-		rf.mu.Lock()
-		rf.mu.Unlock()
 	}()
+	rf.mu.Lock()
+	currentTerm := rf.currentTerm
+	rf.mu.Unlock()
+
+
 	reply := RequestVoteReply{}
 	ok := rf.sendRequestVote(server, args, &reply)
-	if !ok {
-		// todo log error
-	}
-	if reply.VoteGranted ==false{
-		rf.mu.Lock()
-		if reply.Term > rf.currentTerm {
-			rf.convertToFollower(reply.Term)
-		}
-		rf.mu.Unlock()
-	}else {
-		atomic.AddInt32(voteNums, 1)
-		rf.mu.Lock()
-		if atomic.LoadInt32(voteNums) > int32(len(rf.peers) >> 1) {
-			rf.convertToLeader()
-		}
-		rf.mu.Unlock()
-	}
-}
 
-func (rf *Raft) doHeartbeat(ctx context.Context) {
-	var (
-		wg *sync.WaitGroup = &sync.WaitGroup{}
-	)
-	defer func() {
-		wg.Wait()
-		rf.wg.Done()
-	}()
-	select {
-	case <- rf.ctx.Done():
-		return
-	default:
-	}
-	rf.mu.Lock()
-	if rf.serverState != Leader{
-		rf.mu.Unlock()
-		return
-	}
-	args := AppendEntriesArgs{
-		Term:         rf.currentTerm,
-		LeaderId:     rf.me,
-		Entries:      nil,
-	}
-	rf.mu.Unlock()
-	for server,_ := range rf.peers{
-		if server == rf.me{
-			continue
-		}
-		wg.Add(1)
-		go rf.wrapSendAppendEntries(wg, server, &args)
-	}
-}
-
-func(rf *Raft)wrapSendAppendEntries(wg *sync.WaitGroup, server int, args *AppendEntriesArgs){
-	defer func() {
-		wg.Done()
-	}()
-	reply := AppendEntriesReply{}
-	ok := rf.sendAppendEntries(server, args, &reply)
-	if !ok {
-		// todo log error
-	}
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if rf.serverState != Leader{
-		return
+
+	if !ok {
+		DebugPrint(dError, "S%d -> S%d, VoteRPC(NetErr)/T%d",rf.me, server,currentTerm)
 	}
 
-	if reply.Term > rf.currentTerm{
-		rf.convertToFollower(reply.Term)
+	if reply.VoteGranted == false {
+		if reply.Term > rf.currentTerm {
+			DebugPrint(dWarn, "S%d -> S%d, VoteRPC(Cvt Follower), For(T%d -> T%d)", rf.me, server, rf.currentTerm, reply.Term)
+			rf.convertToFollower(reply.Term)
+		}
 	} else {
-		// todo for lab2b,2c,2d
+		atomic.AddInt32(voteNums, 1)
+		DebugPrint(dVote, "S%d -> S%d, VoteRPC(Got Vote)/T%d", rf.me, server, rf.currentTerm)
+		if atomic.LoadInt32(voteNums) > int32(len(rf.peers)>>1) {
+			DebugPrint(dLeader, "S%d, VoteRPC(Archived Majority [%d])/T%d, converting to Leader", rf.me, atomic.LoadInt32(voteNums), rf.currentTerm)
+			rf.convertToLeader()
+		}
 	}
+
 }
