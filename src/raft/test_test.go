@@ -8,12 +8,14 @@ package raft
 // test with the original before submitting.
 //
 
-import "testing"
-import "fmt"
-import "time"
-import "math/rand"
-import "sync/atomic"
-import "sync"
+import (
+	"fmt"
+	"math/rand"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
 
 // The tester generously allows solutions to complete elections in one second
 // (much more than the paper's range of timeouts).
@@ -119,7 +121,7 @@ func TestManyElections2A(t *testing.T) {
 	cfg.end()
 }
 
-func TestBasicAgree2B(t *testing.T) {
+func _TestBasicAgree2B(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false, false)
 	defer cfg.cleanup()
@@ -146,7 +148,7 @@ func TestBasicAgree2B(t *testing.T) {
 // check, based on counting bytes of RPCs, that
 // each command is sent to each peer just once.
 //
-func TestRPCBytes2B(t *testing.T) {
+func _TestRPCBytes2B(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false, false)
 	defer cfg.cleanup()
@@ -177,7 +179,7 @@ func TestRPCBytes2B(t *testing.T) {
 	cfg.end()
 }
 
-func TestFailAgree2B(t *testing.T) {
+func _TestFailAgree2B(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false, false)
 	defer cfg.cleanup()
@@ -190,7 +192,7 @@ func TestFailAgree2B(t *testing.T) {
 	leader := cfg.checkOneLeader()
 	DebugPrint(dTest, "S%d is now leader, Line191", leader)
 	cfg.disconnect((leader + 1) % servers)
-	DebugPrint(dTest, "S%d disconnect, Line193",(leader + 1) % servers)
+	DebugPrint(dTest, "S%d disconnect, Line193", (leader+1)%servers)
 	// the leader and remaining follower should be
 	// able to agree despite the disconnected follower.
 	cfg.one(102, servers-1, false)
@@ -211,7 +213,7 @@ func TestFailAgree2B(t *testing.T) {
 	cfg.end()
 }
 
-func TestFailNoAgree2B(t *testing.T) {
+func _TestFailNoAgree2B(t *testing.T) {
 	servers := 5
 	cfg := make_config(t, servers, false, false)
 	defer cfg.cleanup()
@@ -262,7 +264,7 @@ func TestFailNoAgree2B(t *testing.T) {
 	cfg.end()
 }
 
-func TestConcurrentStarts2B(t *testing.T) {
+func _TestConcurrentStarts2B(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false, false)
 	defer cfg.cleanup()
@@ -363,7 +365,7 @@ loop:
 	cfg.end()
 }
 
-func TestRejoin2B(t *testing.T) {
+func _TestRejoin2B(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false, false)
 	defer cfg.cleanup()
@@ -402,7 +404,6 @@ func TestRejoin2B(t *testing.T) {
 }
 
 func TestBackup2B(t *testing.T) {
-	numEntries := 10
 	servers := 5
 	cfg := make_config(t, servers, false, false)
 	defer cfg.cleanup()
@@ -413,37 +414,40 @@ func TestBackup2B(t *testing.T) {
 
 	// put leader and one follower in a partition
 	leader1 := cfg.checkOneLeader()
+	fmt.Printf("Line417\t%.19s\n", time.Now().String())
 	cfg.disconnect((leader1 + 2) % servers)
-	DebugPrint(dTest, "S%d disconnect, Line415", (leader1 + 2) % servers)
+	DebugPrint(dTest, "S%d disconnect, Line415", (leader1+2)%servers)
 	cfg.disconnect((leader1 + 3) % servers)
-	DebugPrint(dTest, "S%d disconnect, Line417", (leader1 + 3) % servers)
+	DebugPrint(dTest, "S%d disconnect, Line417", (leader1+3)%servers)
 	cfg.disconnect((leader1 + 4) % servers)
-	DebugPrint(dTest, "S%d disconnect, Line419", (leader1 + 4) % servers)
+	DebugPrint(dTest, "S%d disconnect, Line419", (leader1+4)%servers)
 
 	// submit lots of commands that won't commit
-	for i := 0; i < numEntries; i++ {
+	for i := 0; i < 50; i++ {
 		cfg.rafts[leader1].Start(rand.Int())
 	}
+	fmt.Printf("Line429\t%.19s\n", time.Now().String())
 
 	time.Sleep(RaftElectionTimeout / 2)
 
 	cfg.disconnect((leader1 + 0) % servers)
-	DebugPrint(dTest, "S%d disconnect, Line429", (leader1 + 0) % servers)
+	DebugPrint(dTest, "S%d disconnect, Line429", (leader1+0)%servers)
 	cfg.disconnect((leader1 + 1) % servers)
-	DebugPrint(dTest, "S%d disconnect, Line431", (leader1 + 1) % servers)
-
+	DebugPrint(dTest, "S%d disconnect, Line431", (leader1+1)%servers)
 	// allow other partition to recover
 	cfg.connect((leader1 + 2) % servers)
-	DebugPrint(dTest, "S%d connect, Line435", (leader1 + 2) % servers)
+	DebugPrint(dTest, "S%d connect, Line435", (leader1+2)%servers)
 	cfg.connect((leader1 + 3) % servers)
-	DebugPrint(dTest, "S%d connect, Line437", (leader1 + 3) % servers)
+	DebugPrint(dTest, "S%d connect, Line437", (leader1+3)%servers)
 	cfg.connect((leader1 + 4) % servers)
-	DebugPrint(dTest, "S%d connect, Line439", (leader1 + 4) % servers)
+	DebugPrint(dTest, "S%d connect, Line439", (leader1+4)%servers)
+
 
 	// lots of successful commands to new group.
-	for i := 0; i < numEntries; i++ {
+	for i := 0; i < 50; i++ {
 		cfg.one(rand.Int(), 3, true)
 	}
+	fmt.Printf("Line450\t%.19s\n", time.Now().String())
 
 	// now another partitioned leader and one follower
 	leader2 := cfg.checkOneLeader()
@@ -452,12 +456,13 @@ func TestBackup2B(t *testing.T) {
 		other = (leader2 + 1) % servers
 	}
 	cfg.disconnect(other)
-	DebugPrint(dTest, "S%d disconnect, Line453",other)
+	DebugPrint(dTest, "S%d disconnect, Line453", other)
 
 	// lots more commands that won't commit
-	for i := 0; i < numEntries; i++ {
+	for i := 0; i < 50; i++ {
 		cfg.rafts[leader2].Start(rand.Int())
 	}
+	fmt.Printf("Line465\t%.19s\n", time.Now().String())
 
 	time.Sleep(RaftElectionTimeout / 2)
 
@@ -467,28 +472,30 @@ func TestBackup2B(t *testing.T) {
 		DebugPrint(dTest, "S%d disconnect, Line465", i)
 	}
 	cfg.connect((leader1 + 0) % servers)
-	DebugPrint(dTest, "S%d connect, Line468", (leader1 + 0) % servers)
+	DebugPrint(dTest, "S%d connect, Line468", (leader1+0)%servers)
 	cfg.connect((leader1 + 1) % servers)
-	DebugPrint(dTest, "S%d connect, Line470", (leader1 + 1) % servers)
+	DebugPrint(dTest, "S%d connect, Line470", (leader1+1)%servers)
 	cfg.connect(other)
-	DebugPrint(dTest, "S%d connect, Line472",other)
+	DebugPrint(dTest, "S%d connect, Line472", other)
 
 	// lots of successful commands to new group.
-	for i := 0; i < numEntries; i++ {
+	for i := 0; i < 50; i++ {
 		cfg.one(rand.Int(), 3, true)
 	}
+	fmt.Printf("Line485\t%.19s\n", time.Now().String())
 
 	// now everyone
 	for i := 0; i < servers; i++ {
 		cfg.connect(i)
 		DebugPrint(dTest, "S%d connect, Line482", i)
 	}
+	fmt.Printf("Line492\t%.19s\n", time.Now().String())
 	cfg.one(rand.Int(), servers, true)
 
 	cfg.end()
 }
 
-func TestCount2B(t *testing.T) {
+func _TestCount2B(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false, false)
 	defer cfg.cleanup()

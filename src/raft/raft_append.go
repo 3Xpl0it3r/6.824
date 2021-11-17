@@ -18,14 +18,12 @@ type AppendEntriesArgs struct {
 	PrevLogTerm  int
 	Entries      []Entry
 	LeaderCommit int // leader's commitIndex
-	// used for debug
-	LogLen int
 }
 
 type AppendEntriesReply struct {
-	Term            int  // currentTerm, for leader to update itself
-	Success         bool // true if follower contained entry matching prevLogIndex and  prevLogTerm
-	ReplyIndex int
+	Term      int  // currentTerm, for leader to update itself
+	Success   bool // true if follower contained entry matching prevLogIndex and  prevLogTerm
+	NextIndex int
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -33,9 +31,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	defer func() {
 		rf.mu.Unlock()
 	}()
-	DebugPrint(dWarn, "S%d <- S%d, ApEntRPC(Received)/T%d", rf.me, args.LeaderId, rf.currentTerm)
 	reply.Success = false
 	reply.Term = rf.currentTerm
+	reply.NextIndex = rf.commitIndex + 1
 	// rule for all server
 	rf.applyLogToStateMachine()
 	if args.Term < rf.currentTerm {
@@ -81,12 +79,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		DebugPrint(dLog2, "S%d <- S%d, ApEntRPC(CMI UPT)/T%d, Msg(T%d -> T%d)", rf.me, args.LeaderId, rf.currentTerm, oldCI, rf.commitIndex)
 	}
 	reply.Success = true
-	DebugPrint(dLog2, "S%d <- S%d, ApEntRPC(Log Saved)/T%d, CLL: %d Msg(PLI: %d PLT: %d Entry: %v)", rf.me, args.LeaderId, rf.currentTerm, len(rf.log), args.PrevLogIndex, args.PrevLogTerm, args.Entries)
-
+	DebugPrint(dLog2, "S%d <- S%d, ApEntRPC(Log Saved)/T%d, CLL: %d Msg(PLI: %d PLT: %d EntryL: %v)", rf.me, args.LeaderId, rf.currentTerm, len(rf.log), args.PrevLogIndex, args.PrevLogTerm, len(args.Entries))
 }
 
-func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
-	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+func (rf *Raft) sendAppendEntries(server int, args AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntries", &args, reply)
 	return ok
 }
 
@@ -113,7 +110,6 @@ func (rf *Raft) doAppendEntries(ctx context.Context) {
 		LeaderId:     rf.me,
 		Entries:      []Entry{},
 		LeaderCommit: rf.commitIndex,
-		LogLen: len(rf.log),
 	}
 
 	for server, _ := range rf.peers {
@@ -126,11 +122,13 @@ func (rf *Raft) doAppendEntries(ctx context.Context) {
 		} else {
 			args.PrevLogTerm = rf.log[args.PrevLogIndex-1].Term
 		}
-		args.Entries = rf.log[args.PrevLogIndex:]
+		//args.Entries = rf.log[args.PrevLogIndex:]
+		args.Entries = make([]Entry, len(rf.log)-args.PrevLogIndex)
+		copy(args.Entries, rf.log[args.PrevLogIndex:])
 		wg.Add(1)
 		// PLI prevLogIndex PLT: prevLogTerm N:
-		DebugPrint(dLog, "S%d -> S%d, ApEntRPC(Sending)/T%d, CLL: %d Msg(PLI: %d  PLT: %d ENL: %d LC: %d) - %v",
-			rf.me, server, args.Term, args.LogLen, args.PrevLogIndex, args.PrevLogTerm, len(args.Entries), args.LeaderCommit, args.Entries)
+		DebugPrint(dLog, "S%d -> S%d, ApEntRPC(Sending)/T%d,  Msg(PLI: %d  PLT: %d ENL: %d LC: %d) - EntryLen: %d",
+			rf.me, server, args.Term, args.PrevLogIndex, args.PrevLogTerm, len(args.Entries), args.LeaderCommit, len(args.Entries))
 		go rf.wrapSendAppendEntries(wg, server, args)
 	}
 	rf.mu.Unlock()
@@ -146,13 +144,12 @@ func (rf *Raft) wrapSendAppendEntries(wg *sync.WaitGroup, server int, args Appen
 	rf.mu.Unlock()
 
 	reply := AppendEntriesReply{}
-	ok := rf.sendAppendEntries(server, &args, &reply)
+	ok := rf.sendAppendEntries(server, args, &reply)
 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
 	if !ok {
-		DebugPrint(dError, "S%d -> S%d, ApEntRPC(NetErr)/T%d", rf.me, server, currentTerm)
 		return
 	}
 
@@ -167,9 +164,8 @@ func (rf *Raft) wrapSendAppendEntries(wg *sync.WaitGroup, server int, args Appen
 		// todo for lab2b,2c,2d
 		if !reply.Success && rf.nextIndex[server] > 1 {
 			prevNextIndex := rf.nextIndex[server]
-			rf.nextIndex[server] --
-			//rf.nextIndex[server] = reply.ReplyIndex + 1
-			DebugPrint(dWarn, "S%d -> S%d, ApEntRPC(NotMatch)/T%d, NI(%d->%d), Repl(S:%v,T:%v)", rf.me, server, currentTerm, prevNextIndex, rf.nextIndex[server], reply.Success, reply.Term)
+			rf.nextIndex[server] = reply.NextIndex
+			DebugPrint(dWarn, "S%d -> S%d, ApEntRPC(NotMatch)/T%d, NI(%d->%d), Repl(S:%v,T:%v, NI: %d)", rf.me, server, currentTerm, prevNextIndex, rf.nextIndex[server], reply.Success, reply.Term, reply.NextIndex)
 		} else {
 			rf.nextIndex[server] += len(args.Entries)
 			rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)

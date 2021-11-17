@@ -39,7 +39,7 @@ const (
 )
 
 // it should be about 10ms according paper, but is test it limit <= 10 times peer second, so we should set heartbeat period > 100 ms
-const defaultHeartbeatPeriod = 110 * time.Millisecond
+const defaultHeartbeatPeriod = 50 * time.Millisecond
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -346,7 +346,7 @@ func (rf *Raft) Kill() {
 		close(rf.heartbeatCh)
 	}()
 	rf.cancelFn()
-	rf.waitAllGoroutineComplete()
+	//rf.waitAllGoroutineComplete()
 }
 
 func (rf *Raft) killed() bool {

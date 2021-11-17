@@ -503,6 +503,7 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 	for time.Since(t0).Seconds() < 10 {
 		// try all the servers, maybe one is the leader.
 		index := -1
+
 		for si := 0; si < cfg.n; si++ {
 			starts = (starts + 1) % cfg.n
 			var rf *Raft
@@ -519,11 +520,13 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 				}
 			}
 		}
+
 		if index != -1 {
 			// somebody claimed to be the leader and to have
 			// submitted our command; wait a while for agreement.
 			t1 := time.Now()
 			for time.Since(t1).Seconds() < 2 {
+				fmt.Printf("。。。。。。。。。\t%.29s\n",time.Now().String())
 				nd, cmd1 := cfg.nCommitted(index)
 				if nd > 0 && nd >= expectedServers {
 					// committed
@@ -538,6 +541,7 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 				cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
 			}
 		} else {
+			fmt.Printf("Sleep 50 millsecond")
 			time.Sleep(50 * time.Millisecond)
 		}
 	}

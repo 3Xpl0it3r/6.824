@@ -60,7 +60,7 @@ func (rf *Raft) wrapSendRequestVote(wg *sync.WaitGroup, voteNums *int32, server 
 		wg.Done()
 	}()
 	rf.mu.Lock()
-	currentTerm := rf.currentTerm
+	//currentTerm := rf.currentTerm
 	rf.mu.Unlock()
 
 
@@ -71,7 +71,8 @@ func (rf *Raft) wrapSendRequestVote(wg *sync.WaitGroup, voteNums *int32, server 
 	defer rf.mu.Unlock()
 
 	if !ok {
-		DebugPrint(dError, "S%d -> S%d, VoteRPC(NetErr)/T%d",rf.me, server,currentTerm)
+		//DebugPrint(dError, "S%d -> S%d, VoteRPC(NetErr)/T%d",rf.me, server,currentTerm)
+		return
 	}
 
 	if reply.VoteGranted == false {
