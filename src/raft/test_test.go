@@ -8,16 +8,30 @@ package raft
 // test with the original before submitting.
 //
 
-import "testing"
-import "fmt"
-import "time"
-import "math/rand"
-import "sync/atomic"
-import "sync"
+import (
+	"fmt"
+	"math/rand"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
 
 // The tester generously allows solutions to complete elections in one second
 // (much more than the paper's range of timeouts).
 const RaftElectionTimeout = 1000 * time.Millisecond
+
+func account_rpcs(cfg *config) {
+	cfg.mu.Lock()
+	t := time.Since(cfg.t0).Seconds()       // real time
+	npeers := cfg.n                         // number of Raft peers
+	nrpc := cfg.rpcTotal() - cfg.rpcs0      // number of RPC sends
+	nbytes := cfg.bytesTotal() - cfg.bytes0 // number of bytes
+	ncmds := cfg.maxIndex - cfg.maxIndex0   // number of Raft agreements reported
+	cfg.mu.Unlock()
+
+	fmt.Printf("  %4.1f  %d %4d %7d %4d\n", t, npeers, nrpc, nbytes, ncmds)
+}
 
 func TestInitialElection2A(t *testing.T) {
 	servers := 3
