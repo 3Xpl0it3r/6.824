@@ -362,6 +362,7 @@ func (cfg *config) cleanup() {
 
 // attach server i to the net.
 func (cfg *config) connect(i int) {
+	DebugPretty(dInfo, "S%d -- connect ", i)
 	// fmt.Printf("connect(%d)\n", i)
 
 	cfg.connected[i] = true
@@ -385,6 +386,7 @@ func (cfg *config) connect(i int) {
 
 // detach server i from the net.
 func (cfg *config) disconnect(i int) {
+	DebugPretty(dInfo, "S%d -- disconnect ", i)
 	// fmt.Printf("disconnect(%d)\n", i)
 
 	cfg.connected[i] = false
@@ -570,6 +572,7 @@ func cost1(prevTime time.Time) uint64 {
 }
 func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 	t0 := time.Now()
+	DebugPretty(dInfo, "S0 --- cfg.one(%d)", cmd)
 	starts := 0
 	for time.Since(t0).Seconds() < 10 && cfg.checkFinished() == false {
 		// try all the servers, maybe one is the leader.

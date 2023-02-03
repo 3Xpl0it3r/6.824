@@ -289,11 +289,6 @@ func (rf *Raft) ticker() {
 		case Leader:
 			rf.StartLeader()
 		}
-
-		rf.funcWrapperWithStateProtect(func() error {
-			rf.resetElectionTimer()
-			return nil
-		}, LevelRaftSM)
 	}
 }
 
@@ -301,7 +296,7 @@ func (rf *Raft) ticker() {
 func (rf *Raft) StartFollower(elt time.Duration) {
 	// this is should be delete, only to print some atomic values for ds debug
 	rf.funcWrapperWithStateProtect(func() error {
-		DebugPretty(dTimer, "S%d I'm follower at T%d, pausing HB %d [%v]", rf.me, rf.currentTerm, elt/time.Millisecond, time.Now().UnixMilli())
+		DebugPretty(dTimer, "S%d I'm follower at T%d, pausing HBT %d [%v]", rf.me, rf.currentTerm, elt/time.Millisecond, time.Now().UnixMilli())
 		return nil
 	}, LevelRaftSM)
 
@@ -312,7 +307,7 @@ func (rf *Raft) StartFollower(elt time.Duration) {
 
 	// this function will cause some atomic value changes, so this shoule be wrapper with protect function
 	rf.funcWrapperWithStateProtect(func() error {
-		if err := rf.switchState(Follower, Candidate, nil); err!=nil {
+		if err := rf.switchState(Follower, Candidate, nil); err != nil {
 			panic(fmt.Errorf("S%d switchState expected %s but got %s", rf.me, Follower.String(), rf.role.String()))
 		}
 		return nil
@@ -323,13 +318,9 @@ func (rf *Raft) StartFollower(elt time.Duration) {
 func (rf *Raft) StartCandidate(elt time.Duration) {
 	rf.funcWrapperWithStateProtect(func() error {
 		DebugPretty(dTimer, "S%d Cvert Candidate, calling vote T%d [%v]", rf.me, rf.currentTerm, time.Now().UnixMilli())
-		if err := rf.switchState(Candidate, Candidate, func() {
-			rf.resetElectionTimer()
-			rf.updateTerm(rf.currentTerm + 1)
-			rf.updateVoteFor(rf.me)
-		}); err != nil {
-			panic(fmt.Errorf("S%d switchState expected %s but got %s", rf.me, Candidate.String(), rf.role.String()))
-		}
+		rf.resetElectionTimer()
+		rf.updateTerm(rf.currentTerm + 1)
+		rf.updateVoteFor(rf.me)
 		go rf.StartElection(rf.currentTerm, elt)
 		return nil
 	}, LevelRaftSM)
@@ -348,12 +339,13 @@ func (rf *Raft) StartLeader() {
 	rf.funcWrapperWithStateProtect(func() error {
 		term = rf.currentTerm
 		go rf.StartAppendEntries(term)
+		rf.resetElectionTimer()
 		return nil
 	}, LevelRaftSM)
 
 	for rf.GetRole() == Leader {
 		if rf.checkElectionTimeout(defaultHeartbeatPeriod) {
-			DebugPretty(dInfo, "S%d issue appent rpc for timeout", rf.me)
+			DebugPretty(dTimer, "S%d issue appent rpc for timeout at %v", rf.me, time.Now().UnixMilli())
 			break
 		}
 
@@ -367,7 +359,7 @@ func (rf *Raft) StartLeader() {
 			return nil
 
 		}, LevelLogSS); err != nil {
-			DebugPretty(dInfo, "S%d issue appent rpc for : %v", rf.me, err)
+			DebugPretty(dTimer, "S%d issue appent rpc for : %v", rf.me, err)
 			break
 		}
 

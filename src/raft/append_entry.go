@@ -26,14 +26,13 @@ type AppendEntriesReply struct {
 
 // Raft represent raft
 func (rf *Raft) RequestAppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	reply.Success = false
-	DebugPretty(dLog2, "S%d receive AppEnt <- S%d (PLI:%d PLT:%d, LCMI:%d, LT:%d) - %d", rf.me, args.LeaderId, args.PrevLogIndex, args.PrevLogTerm, args.LeaderCommit, args.Term, time.Now().UnixMilli())
+	DebugPretty(dLog, "S%d receive AppEnt <- S%d (PLI:%d PLT:%d, LCMI:%d, LT:%d) - %d", rf.me, args.LeaderId, args.PrevLogIndex, args.PrevLogTerm, args.LeaderCommit, args.Term, time.Now().UnixMilli())
 
 	topHalf := func() error {
 
 		// if rpcs term is smaller than ourself's term ,then we shoud reconized this request is illegal, then drop it
-		if args.Term < rf.currentTerm {
-			err := fmt.Errorf("chk term faied, curT:%d < rpcT:%d", rf.currentTerm, reply.Term)
+		if rf.currentTerm > args.Term {
+			err := fmt.Errorf("chk term faied, curT:%d > rpcT:%d", rf.currentTerm, reply.Term)
 			reply.Term = rf.currentTerm
 			return err
 		}
@@ -46,40 +45,48 @@ func (rf *Raft) RequestAppendEntries(args *AppendEntriesArgs, reply *AppendEntri
 			DebugPretty(dTimer, "S%d <- S:%d AppEnt reset elt", rf.me, args.LeaderId)
 		})
 
+		rf.resetElectionTimer()
 		reply.Term = rf.currentTerm
 		return nil
 	}
 
 	if err := rf.funcWrapperWithStateProtect(topHalf, LevelRaftSM); err != nil {
-		DebugPretty(dError, "S%d -> S%d Reject log,msg: %s", rf.me, args.LeaderId, err.Error())
+		// this error is cause by term checker
+		// this reponse will not be accpeted by leader  for the term will is smaller than leader' term
+		DebugPretty(dLog, "S%d -> S%d Reject log topHalf,msg: %s", rf.me, args.LeaderId, err.Error())
 		return
 	}
 
 	bottomHalf := func() error {
 		reply.NextIndex = rf.commitIndex + 1
+
+		if rf.commitIndex > args.PrevLogIndex {
+			return fmt.Errorf("CMI:%d > PLI:%d(for commited log cannot be deleted)", rf.commitIndex, args.PrevLogIndex)
+		}
+
 		if ok := rf.findFollowerNextIndex(args); !ok {
 			return fmt.Errorf("notice Leader update nextIndex=%d", reply.NextIndex)
 		}
-		// remove conflict log entries
+
+		// remove conflict log entries and then append new entries into local storage
 		rf.log = rf.log[0:args.PrevLogIndex]
 		rf.log = append(rf.log, args.Entries...)
-		reply.Success = true
-		// update follower commit index
 
+		// update follower commit index and apply log to statemachine if necessary
 		rf.updateFollowerCommitIndex(args)
-
-		DebugPretty(dLog2, "S%d Saved Logs[%d](PLI:%v PLT:%v) [LI:%d CI:%d] at:T%d  all:%v", rf.me, len(args.Entries), args.PrevLogIndex, args.PrevLogTerm, rf.lastApplied, rf.commitIndex, reply.Term, len(rf.log))
-
 		rf.applyLogEntry()
+
+		DebugPretty(dLog, "S%d Saved Logs[%d](PLI:%v PLT:%v) [LI:%d CI:%d] at:T%d  all:%v", rf.me, len(args.Entries), args.PrevLogIndex, args.PrevLogTerm, rf.lastApplied, rf.commitIndex, reply.Term, len(rf.log))
 
 		return nil
 	}
 
 	if err := rf.funcWrapperWithStateProtect(bottomHalf, LevelLogSS); err != nil {
+		DebugPretty(dLog, "S%d -> S%d Rejct log ,msg: %v", rf.me, args.LeaderId, err)
 		return
 	}
+	reply.Success = true
 
-	return
 }
 
 // Raft represent raft
@@ -91,32 +98,49 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // Raft represent raft
 func (rf *Raft) ResponseAppendEntries(server int, args AppendEntriesArgs) {
 	reply := &AppendEntriesReply{}
+
 	if !rf.sendAppendEntries(server, &args, reply) {
 		return
 	}
+
+	// topHalf is used to validate this response is validate, or should drop it and stop handling
 	topHalf := func() error {
-		if reply.Term > rf.currentTerm {
+
+		if rf.currentTerm < reply.Term {
+			err := fmt.Errorf("ourself term invalid , ,cvt follower curT:%d -> rpcT:%d", rf.currentTerm, reply.Term)
 			rf.switchState(Any, Follower, func() {
 				rf.updateTerm(reply.Term)
 			})
-			err := fmt.Errorf("S%d lose leader for term,cvt follower T%d -> T%d", rf.me, rf.currentTerm, reply.Term)
 			return err
+		}
+
+		// make sure term is out-of-date resp will not be handlered
+		if rf.currentTerm > reply.Term {
+			return fmt.Errorf("follower term invalid, curT:%d > rpcT:%d", rf.currentTerm, reply.Term)
 		}
 		return nil
 	}
 
 	if err := rf.funcWrapperWithStateProtect(topHalf, LevelRaftSM); err != nil {
+		DebugPretty(dLog, "S%d <- S%d Drop AppEnt Resp , msg: %v", rf.me, server, err)
 		return
 	}
 
+	// update some log status
 	bottomHalf := func() error {
 		if reply.Success {
+
+            // 
+			if rf.matchIndex[server] > args.PrevLogIndex+len(args.Entries) {
+				return nil
+			}
+
 			rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
 			rf.nextIndex[server] += len(args.Entries)
-			DebugPretty(dLog, "S%d -> S%d ok, update matchIndex %d nextIdx:%d at:%v", rf.me, server, rf.matchIndex[server], rf.nextIndex[server], time.Now().UnixMilli())
+			DebugPretty(dLeader, "S%d -> S%d ok, update matchIndex %d nextIdx:%d at:%v", rf.me, server, rf.matchIndex[server], rf.nextIndex[server], time.Now().UnixMilli())
 		} else {
 			rf.nextIndex[server] = reply.NextIndex
-			DebugPretty(dLog, "S%d -> S%d ✘, set nextIndex %d, at:%v", rf.me, server, rf.nextIndex[server], time.Now().UnixMilli())
+			DebugPretty(dLeader, "S%d -> S%d ✘, set nextIndex %d, at:%v", rf.me, server, rf.nextIndex[server], time.Now().UnixMilli())
 		}
 
 		return nil
@@ -131,6 +155,7 @@ func (rf *Raft) ResponseAppendEntries(server int, args AppendEntriesArgs) {
 func (rf *Raft) StartAppendEntries(term int) {
 
 	concurApEnt := func() error {
+		DebugPretty(dLeader, "S%d Issue AppEnt T:%d MI:%v NI:%v log:%v", rf.me, term, rf.matchIndex, rf.nextIndex, rf.log)
 		args := AppendEntriesArgs{
 			Term:         term,
 			LeaderId:     rf.me,
@@ -144,7 +169,6 @@ func (rf *Raft) StartAppendEntries(term int) {
 			if serverIdx == rf.me {
 				continue
 			}
-			DebugPretty(dInfo, "S%d -> %d Prepare send %v|%v|%v", rf.me, serverIdx, rf.matchIndex, rf.nextIndex, rf.log)
 			args.PrevLogIndex = rf.nextIndex[serverIdx] - 1
 			if args.PrevLogIndex == 0 {
 				args.PrevLogTerm = -1
@@ -154,7 +178,7 @@ func (rf *Raft) StartAppendEntries(term int) {
 				args.Entries = logCopy[args.PrevLogIndex:]
 			}
 
-			DebugPretty(dLog, "S%d -> S%d Sending PLI:%d PLT:%d N:%d LC:%d at T:%d- len: %v", rf.me, serverIdx, args.PrevLogIndex, args.PrevLogTerm, rf.nextIndex[serverIdx], rf.commitIndex, args.Term, args.Entries)
+			DebugPretty(dLeader, "S%d -> S%d Sending PLI:%d PLT:%d N:%d LC:%d at T:%d- len: %v", rf.me, serverIdx, args.PrevLogIndex, args.PrevLogTerm, rf.nextIndex[serverIdx], rf.commitIndex, args.Term, args.Entries)
 			go rf.ResponseAppendEntries(serverIdx, args)
 
 		}
@@ -186,12 +210,15 @@ func (rf *Raft) updateLeaderCommitIndex(term int) bool {
 
 // Raft represent raft
 func (rf *Raft) updateFollowerCommitIndex(args *AppendEntriesArgs) {
+	// if leader's commitIndex is larger than follower's commit
+	// then set outself commitIndex to min(len(rf.log), leader'CommitIndex)
 	if args.LeaderCommit > rf.commitIndex {
 		if args.LeaderCommit > len(rf.log) {
 			rf.commitIndex = len(rf.log)
 		} else {
 			rf.commitIndex = args.LeaderCommit
 		}
+		DebugPretty(dCommit, "S%d uppdate commitInex to %d", rf.me, rf.commitIndex)
 	}
 }
 
@@ -212,7 +239,7 @@ func (rf *Raft) applyLogEntry() {
 			rf.applyCh <- msg
 			rf.lastApplied++
 		}
-		DebugPretty(dTrace, "S%d Applied %d logs, lastApplied:%d ", rf.me, n, rf.lastApplied)
+		DebugPretty(dCommit, "S%d Applied %d logs, lastApplied:%d ", rf.me, n, rf.lastApplied)
 	} else {
 		// DebugPretty(dTrace, "S%d Nothing left to apply LastApplied:%d MatchIndex:%v| log%v", rf.me, rf.lastApplied, rf.matchIndex, rf.log)
 	}

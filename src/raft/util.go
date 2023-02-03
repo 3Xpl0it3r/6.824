@@ -27,7 +27,7 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 }
 
 func DebugPretty(topic logTopic, format string, a ...interface{}) {
-	if debugVerbosity > 0{
+	if debugVerbosity > 0 {
 		time := time.Since(debugStart).Microseconds()
 		time /= 100
 		prefix := fmt.Sprintf("%06d %v ", time, string(topic))
@@ -109,11 +109,13 @@ func (rf *Raft) switchState(from, to Role, stateFn func()) error {
 		return fmt.Errorf("switch %s -> %s failed, expect: %d ,but got %d", from, to, from, rf.role)
 	}
 
+	// this is default config
 	rf.role = to
+
+	// hook should be overwrite default if necessary
 	if stateFn != nil {
 		stateFn()
 	}
-	rf.resetElectionTimer()
 	return nil
 }
 
