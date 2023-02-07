@@ -14,6 +14,7 @@ type RaftProtectLevel int32
 const (
 	LevelLogSS RaftProtectLevel = iota
 	LevelRaftSM
+	LevelAllProtect
 )
 
 // Debugging

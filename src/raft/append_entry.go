@@ -42,10 +42,10 @@ func (rf *Raft) RequestAppendEntries(args *AppendEntriesArgs, reply *AppendEntri
 			if rf.currentTerm < args.Term {
 				rf.updateTerm(args.Term)
 			}
-			DebugPretty(dTimer, "S%d <- S:%d AppEnt reset elt", rf.me, args.LeaderId)
 		})
 
 		rf.resetElectionTimer()
+		DebugPretty(dTimer, "S%d <- S:%d AppEnt reset elt - %v - %v", rf.me, args.LeaderId, time.Now().Sub(rf.termAt).Milliseconds(), rf.termAt.UnixMilli())
 		reply.Term = rf.currentTerm
 		return nil
 	}
@@ -76,13 +76,13 @@ func (rf *Raft) RequestAppendEntries(args *AppendEntriesArgs, reply *AppendEntri
 		rf.updateFollowerCommitIndex(args)
 		rf.applyLogEntry()
 
-		DebugPretty(dLog, "S%d Saved Logs[%d](PLI:%v PLT:%v) [LI:%d CI:%d] at:T%d  all:%v", rf.me, len(args.Entries), args.PrevLogIndex, args.PrevLogTerm, rf.lastApplied, rf.commitIndex, reply.Term, len(rf.log))
+		DebugPretty(dLog, "S%d ->S%d Saved Logs[%d](PLI:%v PLT:%v) [LI:%d CI:%d] at:T%d  all:%v - %v", rf.me, args.LeaderId, len(args.Entries), args.PrevLogIndex, args.PrevLogTerm, rf.lastApplied, rf.commitIndex, reply.Term, len(rf.log), time.Now().UnixMilli())
 
 		return nil
 	}
 
 	if err := rf.funcWrapperWithStateProtect(bottomHalf, LevelLogSS); err != nil {
-		DebugPretty(dLog, "S%d -> S%d Rejct log ,msg: %v", rf.me, args.LeaderId, err)
+		DebugPretty(dLog, "S%d -> S%d Rejct log ,msg: %v - %v", rf.me, args.LeaderId, err, time.Now().UnixMilli())
 		return
 	}
 	reply.Success = true
@@ -105,6 +105,10 @@ func (rf *Raft) ResponseAppendEntries(server int, args AppendEntriesArgs) {
 
 	// topHalf is used to validate this response is validate, or should drop it and stop handling
 	topHalf := func() error {
+		//
+		if rf.currentTerm > args.Term {
+			return fmt.Errorf("belated rpc request curT:%d < oldT:%d", rf.currentTerm, args.Term)
+		}
 
 		if rf.currentTerm < reply.Term {
 			err := fmt.Errorf("ourself term invalid , ,cvt follower curT:%d -> rpcT:%d", rf.currentTerm, reply.Term)
@@ -130,14 +134,17 @@ func (rf *Raft) ResponseAppendEntries(server int, args AppendEntriesArgs) {
 	bottomHalf := func() error {
 		if reply.Success {
 
-            // 
 			if rf.matchIndex[server] > args.PrevLogIndex+len(args.Entries) {
+				return nil
+			}
+
+			if rf.nextIndex[server] != args.PrevLogIndex+1 {
 				return nil
 			}
 
 			rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
 			rf.nextIndex[server] += len(args.Entries)
-			DebugPretty(dLeader, "S%d -> S%d ok, update matchIndex %d nextIdx:%d at:%v", rf.me, server, rf.matchIndex[server], rf.nextIndex[server], time.Now().UnixMilli())
+			DebugPretty(dLeader, "S%d -> S%d ok, update matchIndex %d nextIdx:%d (PLI:%d len(entries):%d) at:%v", rf.me, server, rf.matchIndex[server], rf.nextIndex[server], args.PrevLogIndex, len(args.Entries), time.Now().UnixMilli())
 		} else {
 			rf.nextIndex[server] = reply.NextIndex
 			DebugPretty(dLeader, "S%d -> S%d ✘, set nextIndex %d, at:%v", rf.me, server, rf.nextIndex[server], time.Now().UnixMilli())
@@ -155,7 +162,6 @@ func (rf *Raft) ResponseAppendEntries(server int, args AppendEntriesArgs) {
 func (rf *Raft) StartAppendEntries(term int) {
 
 	concurApEnt := func() error {
-		DebugPretty(dLeader, "S%d Issue AppEnt T:%d MI:%v NI:%v log:%v", rf.me, term, rf.matchIndex, rf.nextIndex, rf.log)
 		args := AppendEntriesArgs{
 			Term:         term,
 			LeaderId:     rf.me,
@@ -165,6 +171,7 @@ func (rf *Raft) StartAppendEntries(term int) {
 
 		logCopy := make([]LogEntry, len(rf.log))
 		copy(logCopy, rf.log)
+		DebugPretty(dLeader, "S%d Issue AppEnt T:%d MI:%v NI:%v len(log):%v - %v", rf.me, term, rf.matchIndex, rf.nextIndex, len(rf.log), time.Now().UnixMilli())
 		for serverIdx := range rf.peers {
 			if serverIdx == rf.me {
 				continue
@@ -178,7 +185,7 @@ func (rf *Raft) StartAppendEntries(term int) {
 				args.Entries = logCopy[args.PrevLogIndex:]
 			}
 
-			DebugPretty(dLeader, "S%d -> S%d Sending PLI:%d PLT:%d N:%d LC:%d at T:%d- len: %v", rf.me, serverIdx, args.PrevLogIndex, args.PrevLogTerm, rf.nextIndex[serverIdx], rf.commitIndex, args.Term, args.Entries)
+			DebugPretty(dLeader, "S%d -> S%d Sending PLI:%d PLT:%d N:%d LC:%d at T:%d- entries: %v - %v", rf.me, serverIdx, args.PrevLogIndex, args.PrevLogTerm, rf.nextIndex[serverIdx], rf.commitIndex, args.Term, args.Entries, time.Now().UnixMilli())
 			go rf.ResponseAppendEntries(serverIdx, args)
 
 		}

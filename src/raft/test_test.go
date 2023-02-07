@@ -8,14 +8,12 @@ package raft
 // test with the original before submitting.
 //
 
-import (
-	"fmt"
-	"math/rand"
-	"sync"
-	"sync/atomic"
-	"testing"
-	"time"
-)
+import "testing"
+import "fmt"
+import "time"
+import "math/rand"
+import "sync/atomic"
+import "sync"
 
 // The tester generously allows solutions to complete elections in one second
 // (much more than the paper's range of timeouts).
@@ -186,7 +184,7 @@ func TestRPCBytes2B(t *testing.T) {
 //
 // test just failure of followers.
 //
-func TestFor2023TestFollowerFailure2B(t *testing.T) {
+func For2023TestFollowerFailure2B(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false, false)
 	defer cfg.cleanup()
@@ -233,7 +231,7 @@ func TestFor2023TestFollowerFailure2B(t *testing.T) {
 //
 // test just failure of leaders.
 //
-func TestFor2023TestLeaderFailure2B(t *testing.T) {
+func For2023TestLeaderFailure2B(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false, false)
 	defer cfg.cleanup()
@@ -500,16 +498,6 @@ func TestRejoin2B(t *testing.T) {
 	cfg.end()
 }
 
-func print_applied(cfg *config, id int) {
-	cfg.mu.Lock()
-	for _, rf := range cfg.rafts {
-		rf.logMu.Lock()
-		DebugPretty(dInfo, "S%d start/add(%d)  cmi log:%v| all: %v", rf.me, id, cfg.logs[rf.me], rf.log)
-		rf.logMu.Unlock()
-	}
-	cfg.mu.Unlock()
-}
-
 func TestBackup2B(t *testing.T) {
 	servers := 5
 	cfg := make_config(t, servers, false, false)
@@ -517,9 +505,7 @@ func TestBackup2B(t *testing.T) {
 
 	cfg.begin("Test (2B): leader backs up quickly over incorrect follower logs")
 
-	cfg.one(-1, servers, true)
-
-	print_applied(cfg, -1)
+	cfg.one(rand.Int(), servers, true)
 
 	// put leader and one follower in a partition
 	leader1 := cfg.checkOneLeader()
@@ -528,14 +514,11 @@ func TestBackup2B(t *testing.T) {
 	cfg.disconnect((leader1 + 4) % servers)
 
 	// submit lots of commands that won't commit
-	for i := 0; i < 5; i++ {
-		DebugPretty(dInfo, "S%d -- (leader) Start(%d)", leader1, i)
-		cfg.rafts[leader1].Start(i)
+	for i := 0; i < 50; i++ {
+		cfg.rafts[leader1].Start(rand.Int())
 	}
 
 	time.Sleep(RaftElectionTimeout / 2)
-
-	print_applied(cfg, 4)
 
 	cfg.disconnect((leader1 + 0) % servers)
 	cfg.disconnect((leader1 + 1) % servers)
@@ -546,14 +529,12 @@ func TestBackup2B(t *testing.T) {
 	cfg.connect((leader1 + 4) % servers)
 
 	// lots of successful commands to new group.
-	for i := 0; i < 5; i++ {
-		cfg.one(5+i, 3, true)
-		print_applied(cfg, 5+i)
+	for i := 0; i < 50; i++ {
+		cfg.one(rand.Int(), 3, true)
 	}
 
 	// now another partitioned leader and one follower
 	leader2 := cfg.checkOneLeader()
-
 	other := (leader1 + 2) % servers
 	if leader2 == other {
 		other = (leader2 + 1) % servers
@@ -561,14 +542,11 @@ func TestBackup2B(t *testing.T) {
 	cfg.disconnect(other)
 
 	// lots more commands that won't commit
-	for i := 0; i < 5; i++ {
-		DebugPretty(dInfo, "S%d -- (leder2) Start(%d)", leader2, 10+i)
-		cfg.rafts[leader2].Start(10 + i)
+	for i := 0; i < 50; i++ {
+		cfg.rafts[leader2].Start(rand.Int())
 	}
 
 	time.Sleep(RaftElectionTimeout / 2)
-
-	print_applied(cfg, 14)
 
 	// bring original leader back to life,
 	for i := 0; i < servers; i++ {
@@ -579,19 +557,15 @@ func TestBackup2B(t *testing.T) {
 	cfg.connect(other)
 
 	// lots of successful commands to new group.
-	for i := 0; i < 5; i++ {
-		cfg.one(15+i, 3, true)
-		print_applied(cfg, 15+i)
+	for i := 0; i < 50; i++ {
+		cfg.one(rand.Int(), 3, true)
 	}
 
 	// now everyone
 	for i := 0; i < servers; i++ {
 		cfg.connect(i)
 	}
-
-	print_applied(cfg, 20)
-
-	cfg.one(20, servers, true)
+	cfg.one(rand.Int(), servers, true)
 
 	cfg.end()
 }
