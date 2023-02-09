@@ -21,7 +21,6 @@ import (
 	//	"bytes"
 
 	"errors"
-	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -54,8 +53,10 @@ func (r Role) String() string {
 		return "follower"
 	case Candidate:
 		return "candidate"
+	case Any:
+		return "any"
 	default:
-		panic("unknown server role")
+		panic("unknown server role %d")
 	}
 }
 
@@ -223,18 +224,16 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		return index, term, false
 	}
 
-	if err := rf.funcWrapperWithStateProtect(func() error {
+	leaderCheck := func() error {
 		term = rf.currentTerm
 		isLeader = rf.role == Leader
 		if !isLeader {
-			return errors.New("not leader")
+			return errors.New("S%d I am leader, Start failed")
 		}
 		return nil
-	}, LevelRaftSM); err != nil {
-		return index, term, false
 	}
 
-	rf.funcWrapperWithStateProtect(func() error {
+	addLog := func() error {
 		rf.log = append(rf.log, LogEntry{
 			Term:    term,
 			Command: command,
@@ -244,7 +243,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.nextIndex[rf.me]++
 		DebugPretty(dLog2, "S%d Start Append cmd %v,all:%v", rf.me, command, rf.log)
 		return nil
-	}, LevelLogSS)
+	}
+
+	rf.funcWrapperWithStateProtect(leaderCheck, addLog, func() error { rf.persist(); return nil })
 
 	return index, term, isLeader
 }
@@ -280,12 +281,11 @@ func (rf *Raft) ticker() {
 		// Your code here to check if a leader election should
 		// be started and to randomize sleeping time using
 		// time.Sleep().
-		elt := randomizedElectionTimeout()
 		switch rf.GetRole() {
 		case Follower:
-			rf.StartFollower(elt)
+			rf.StartFollower()
 		case Candidate:
-			rf.StartCandidate(elt)
+			rf.StartCandidate()
 		case Leader:
 			rf.StartLeader()
 		}
@@ -293,98 +293,91 @@ func (rf *Raft) ticker() {
 }
 
 // Raft represent raft
-func (rf *Raft) StartFollower(elt time.Duration) {
+func (rf *Raft) StartFollower() {
+	elt := randomizedElectionTimeout()
 	// this is should be delete, only to print some atomic values for ds debug
-	rf.funcWrapperWithStateProtect(func() error {
-		DebugPretty(dTimer, "S%d I'm follower at T%d, pausing HBT %d [%v]", rf.me, rf.currentTerm, elt/time.Millisecond, time.Now().UnixMilli())
+	debugFn := func() error {
+		DebugPretty(dTimer, "S%d I'm follower at T%d, pausing HBT elt:%d termAt:[%v] now:%d", rf.me, rf.currentTerm, elt/time.Millisecond, rf.termAt.UnixMilli(), time.Now().UnixMilli())
 		return nil
-	}, LevelRaftSM)
-
-	time.Sleep(elt)
-	if !rf.checkElectionTimeout(elt) {
-		return
 	}
 
-	// this function will cause some atomic value changes, so this shoule be wrapper with protect function
-	rf.funcWrapperWithStateProtect(func() error {
-		if err := rf.switchState(Follower, Candidate, nil); err != nil {
-			panic(fmt.Errorf("S%d switchState expected %s but got %s", rf.me, Follower.String(), rf.role.String()))
-		}
-		return nil
-	}, LevelRaftSM)
+	rf.funcWrapperWithStateProtect(debugFn)
+
+	for !rf.elapseElectionTimeoutUntil(Follower, elt, func() { rf.switchState(Follower, Candidate, rf.resetElectionTimer) }) {
+		rf.applyLogEntry()
+		time.Sleep(defaultTickerPeriod)
+	}
+
 }
 
 // StartCandidate start an new election in its own term
-func (rf *Raft) StartCandidate(elt time.Duration) {
+func (rf *Raft) StartCandidate() {
 	rf.funcWrapperWithStateProtect(func() error {
-		DebugPretty(dTimer, "S%d Cvert Candidate, calling vote T%d [%v]", rf.me, rf.currentTerm, time.Now().UnixMilli())
-		rf.resetElectionTimer()
-		rf.updateTerm(rf.currentTerm + 1)
-		rf.updateVoteFor(rf.me)
-		go rf.StartElection(rf.currentTerm, elt)
+		DebugPretty(dTimer, "S%d Convert to Candidate -termAt:%d now:%d", rf.me, rf.termAt.UnixMilli(), time.Now().UnixMilli())
 		return nil
-	}, LevelRaftSM)
+	})
 
-	for rf.GetRole() == Candidate {
-		if rf.checkElectionTimeout(elt) {
-			return
-		}
+	elt := randomizedElectionTimeout()
+	go rf.StartElection()
+
+	for !rf.elapseElectionTimeoutUntil(Candidate, elt, rf.resetElectionTimer) {
 		time.Sleep(defaultTickerPeriod)
 	}
+
 }
 
 // StartLeader start an loop worker for issue an appendRPC every heartbeat period until it's not leader anymore
 func (rf *Raft) StartLeader() {
-	var term int
 	rf.funcWrapperWithStateProtect(func() error {
-		term = rf.currentTerm
-		go rf.StartAppendEntries(term)
-		rf.resetElectionTimer()
+		DebugPretty(dTimer, "S%d Broadcast - termAt:%d now:%d", rf.me, rf.termAt.UnixMilli(), time.Now().UnixMilli())
 		return nil
-	}, LevelRaftSM)
+	})
 
-	for rf.GetRole() == Leader {
-		if rf.checkElectionTimeout(defaultHeartbeatPeriod) {
-			DebugPretty(dTimer, "S%d issue appent rpc for timeout at %v", rf.me, time.Now().UnixMilli())
-			break
-		}
+	go rf.StartAppendEntries()
 
-		if err := rf.funcWrapperWithStateProtect(func() error {
-			// if find an new commitindex which is larger than the old one ,then immediately send
-			if rf.updateLeaderCommitIndex(term) {
-				return errors.New("find n > commitIndex, need send")
-			}
-
-			rf.applyLogEntry()
-			return nil
-
-		}, LevelLogSS); err != nil {
-			DebugPretty(dTimer, "S%d issue appent rpc for : %v", rf.me, err)
-			break
-		}
-
+	for !rf.elapseElectionTimeoutUntil(Leader, defaultHeartbeatPeriod, rf.resetElectionTimer) {
 		time.Sleep(defaultTickerPeriod)
 	}
 }
 
 // Raft represent raft
-func (rf *Raft) checkElectionTimeout(elt time.Duration) bool {
+// true means it can skip current loop, step into next role
+func (rf *Raft) elapseElectionTimeoutUntil(role Role, elt time.Duration, deferFn func(), cfns ...func() bool) bool {
 	rf.mu.Lock()
-	defer func() {
-		rf.mu.Unlock()
+	defer rf.mu.Unlock()
 
-	}()
-	delay := time.Now().Sub(rf.termAt) - elt
-	if delay > 0 {
+	// if role has chaned, then should jump out loop immediately
+	if rf.role != role {
 		return true
 	}
+
+	condition := func() bool {
+		ret := false
+		for _, fn := range cfns {
+			if fn == nil {
+				continue
+			}
+			if !fn() {
+				return false
+			}
+			ret = true
+		}
+		return ret
+	}
+
+	if time.Now().Sub(rf.termAt)-elt > 0 || condition() {
+		if deferFn != nil {
+			deferFn()
+		}
+		return true
+	}
+
 	return false
 }
 
 // Raft represent raft
-func (rf *Raft) commitIndexChecker() bool {
-	rf.logMu.Lock()
-	defer rf.logMu.Unlock()
+func (rf *Raft) checkCommitIndexAndApplyLog() bool {
+	rf.applyLogEntry()
 	return rf.commitIndex < len(rf.log)
 }
 

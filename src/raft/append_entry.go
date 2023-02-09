@@ -15,6 +15,7 @@ type AppendEntriesArgs struct {
 	Entries     []LogEntry // log entries to store (empty for heartbeat ,may send more than one for effictive)
 
 	LeaderCommit int // leader's commitIndex
+
 }
 
 // AppendEntriesReply represent appendentriesreply
@@ -28,7 +29,7 @@ type AppendEntriesReply struct {
 func (rf *Raft) RequestAppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	DebugPretty(dLog, "S%d receive AppEnt <- S%d (PLI:%d PLT:%d, LCMI:%d, LT:%d) - %d", rf.me, args.LeaderId, args.PrevLogIndex, args.PrevLogTerm, args.LeaderCommit, args.Term, time.Now().UnixMilli())
 
-	topHalf := func() error {
+	termValidate := func() error {
 
 		// if rpcs term is smaller than ourself's term ,then we shoud reconized this request is illegal, then drop it
 		if rf.currentTerm > args.Term {
@@ -50,14 +51,7 @@ func (rf *Raft) RequestAppendEntries(args *AppendEntriesArgs, reply *AppendEntri
 		return nil
 	}
 
-	if err := rf.funcWrapperWithStateProtect(topHalf, LevelRaftSM); err != nil {
-		// this error is cause by term checker
-		// this reponse will not be accpeted by leader  for the term will is smaller than leader' term
-		DebugPretty(dLog, "S%d -> S%d Reject log topHalf,msg: %s", rf.me, args.LeaderId, err.Error())
-		return
-	}
-
-	bottomHalf := func() error {
+	logHandler := func() error {
 		reply.NextIndex = rf.commitIndex + 1
 
 		if rf.commitIndex > args.PrevLogIndex {
@@ -78,15 +72,11 @@ func (rf *Raft) RequestAppendEntries(args *AppendEntriesArgs, reply *AppendEntri
 
 		DebugPretty(dLog, "S%d ->S%d Saved Logs[%d](PLI:%v PLT:%v) [LI:%d CI:%d] at:T%d  all:%v - %v", rf.me, args.LeaderId, len(args.Entries), args.PrevLogIndex, args.PrevLogTerm, rf.lastApplied, rf.commitIndex, reply.Term, len(rf.log), time.Now().UnixMilli())
 
+		reply.Success = true
 		return nil
 	}
 
-	if err := rf.funcWrapperWithStateProtect(bottomHalf, LevelLogSS); err != nil {
-		DebugPretty(dLog, "S%d -> S%d Rejct log ,msg: %v - %v", rf.me, args.LeaderId, err, time.Now().UnixMilli())
-		return
-	}
-	reply.Success = true
-
+	rf.funcWrapperWithStateProtect(termValidate, logHandler, func() error { rf.persist(); return nil })
 }
 
 // Raft represent raft
@@ -96,15 +86,18 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 }
 
 // Raft represent raft
-func (rf *Raft) ResponseAppendEntries(server int, args AppendEntriesArgs) {
+func (rf *Raft) IssueRequestAppendEntries(server int, args AppendEntriesArgs) {
 	reply := &AppendEntriesReply{}
+
+	DebugPretty(dLog, "S%d -> S%d Send (PLI:%d PLT:%d LC:%d LT:%d) Ent:%v %v", rf.me, server, args.PrevLogIndex, args.PrevLogTerm, args.LeaderCommit, args.Term, args.Entries, time.Now().UnixMilli())
 
 	if !rf.sendAppendEntries(server, &args, reply) {
 		return
 	}
 
-	// topHalf is used to validate this response is validate, or should drop it and stop handling
-	topHalf := func() error {
+	// termValidate is used to validate this response is validate, or should drop it and stop handling
+	termValidate := func() error {
+
 		//
 		if rf.currentTerm > args.Term {
 			return fmt.Errorf("belated rpc request curT:%d < oldT:%d", rf.currentTerm, args.Term)
@@ -125,13 +118,8 @@ func (rf *Raft) ResponseAppendEntries(server int, args AppendEntriesArgs) {
 		return nil
 	}
 
-	if err := rf.funcWrapperWithStateProtect(topHalf, LevelRaftSM); err != nil {
-		DebugPretty(dLog, "S%d <- S%d Drop AppEnt Resp , msg: %v", rf.me, server, err)
-		return
-	}
-
 	// update some log status
-	bottomHalf := func() error {
+	updateLogIndex := func() error {
 		if reply.Success {
 
 			if rf.matchIndex[server] > args.PrevLogIndex+len(args.Entries) {
@@ -154,16 +142,15 @@ func (rf *Raft) ResponseAppendEntries(server int, args AppendEntriesArgs) {
 
 	}
 
-	rf.funcWrapperWithStateProtect(bottomHalf, LevelLogSS)
-
+	rf.funcWrapperWithStateProtect(termValidate, updateLogIndex)
 }
 
 // StartAppendEntries issue an new AppendLogEntriesRPC witout raft state machined lock
-func (rf *Raft) StartAppendEntries(term int) {
+func (rf *Raft) StartAppendEntries() {
 
 	concurApEnt := func() error {
 		args := AppendEntriesArgs{
-			Term:         term,
+			Term:         rf.currentTerm,
 			LeaderId:     rf.me,
 			Entries:      []LogEntry{}, // for empty appendtry , if log is not empty, then update it
 			LeaderCommit: rf.commitIndex,
@@ -171,7 +158,7 @@ func (rf *Raft) StartAppendEntries(term int) {
 
 		logCopy := make([]LogEntry, len(rf.log))
 		copy(logCopy, rf.log)
-		DebugPretty(dLeader, "S%d Issue AppEnt T:%d MI:%v NI:%v len(log):%v - %v", rf.me, term, rf.matchIndex, rf.nextIndex, len(rf.log), time.Now().UnixMilli())
+		DebugPretty(dLeader, "S%d Issue AppEnt T:%d MI:%v NI:%v len(log):%v - %v", rf.me, rf.currentTerm, rf.matchIndex, rf.nextIndex, len(rf.log), time.Now().UnixMilli())
 		for serverIdx := range rf.peers {
 			if serverIdx == rf.me {
 				continue
@@ -185,17 +172,21 @@ func (rf *Raft) StartAppendEntries(term int) {
 				args.Entries = logCopy[args.PrevLogIndex:]
 			}
 
-			DebugPretty(dLeader, "S%d -> S%d Sending PLI:%d PLT:%d N:%d LC:%d at T:%d- entries: %v - %v", rf.me, serverIdx, args.PrevLogIndex, args.PrevLogTerm, rf.nextIndex[serverIdx], rf.commitIndex, args.Term, args.Entries, time.Now().UnixMilli())
-			go rf.ResponseAppendEntries(serverIdx, args)
+			// DebugPretty(dLeader, "S%d -> S%d  Sending PLI:%d PLT:%d N:%d LC:%d at T:%d- entries: %v - %v", rf.me, serverIdx, args.PrevLogIndex, args.PrevLogTerm, rf.nextIndex[serverIdx], rf.commitIndex, args.Term, args.Entries, time.Now().UnixMilli())
+			go rf.IssueRequestAppendEntries(serverIdx, args)
 
 		}
+
+		rf.updateLeaderCommitIndexAndApplyLogs()
+
 		return nil
 	}
-	rf.funcWrapperWithStateProtect(concurApEnt, LevelLogSS)
+
+	rf.funcWrapperWithStateProtect(concurApEnt)
 }
 
 // Raft represent raft
-func (rf *Raft) updateLeaderCommitIndex(term int) bool {
+func (rf *Raft) updateLeaderCommitIndexAndApplyLogs() bool {
 	if len(rf.log) == 0 {
 		return false
 	}
@@ -203,11 +194,12 @@ func (rf *Raft) updateLeaderCommitIndex(term int) bool {
 	for n := len(rf.log); n > rf.commitIndex; n-- {
 		majority := 0
 		for sverIdx := range rf.peers {
-			if rf.matchIndex[sverIdx] >= n && rf.log[n-1].Term == term {
+			if rf.matchIndex[sverIdx] >= n && rf.log[n-1].Term == rf.currentTerm {
 				majority++
 			}
 			if majority > len(rf.peers)/2 {
 				rf.commitIndex = n
+				rf.applyLogEntry()
 				return true
 			}
 		}
@@ -247,8 +239,6 @@ func (rf *Raft) applyLogEntry() {
 			rf.lastApplied++
 		}
 		DebugPretty(dCommit, "S%d Applied %d logs, lastApplied:%d ", rf.me, n, rf.lastApplied)
-	} else {
-		// DebugPretty(dTrace, "S%d Nothing left to apply LastApplied:%d MatchIndex:%v| log%v", rf.me, rf.lastApplied, rf.matchIndex, rf.log)
 	}
 }
 

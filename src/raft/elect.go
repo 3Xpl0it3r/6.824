@@ -38,9 +38,9 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.VoteGranted = false
-	DebugPretty(dVote, "S%d <-  C%d RequestVote (LI:%d LT:%d T:%d)", rf.me, args.CandidateId, args.LastLogIndex, args.LastLogTerm, args.Term)
+	DebugPretty(dVote, "S%d <- C%d Ask Vote (LI:%d LT:%d T:%d)", rf.me, args.CandidateId, args.LastLogIndex, args.LastLogTerm, args.Term)
 
-	topHalf := func() error {
+	termValidateFn := func() error {
 
 		// if rpc's term is larger than current term ,then set current term to rpc's term, then conver into follower
 		if rf.currentTerm < args.Term {
@@ -65,12 +65,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return nil
 	}
 
-	if err := rf.funcWrapperWithStateProtect(topHalf, LevelRaftSM); err != nil {
-		DebugPretty(dVote, "S%d -> C%d RejectVote[chk term], msg: %v", rf.me, args.CandidateId, err)
-		return
-	}
-
-	bottomHalf := func() error {
+	logUp2dateValidate := func() error {
 		lastLogIndex := len(rf.log)
 
 		if lastLogIndex != 0 {
@@ -88,25 +83,18 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return nil
 	}
 
-	if err := rf.funcWrapperWithStateProtect(bottomHalf, LevelLogSS); err != nil {
-		DebugPretty(dVote, "S%d -> C%d RejectVote[findIndex], msg: %v", rf.me, args.CandidateId, err)
-		return
+	grantVote := func() error {
+		reply.VoteGranted = true
+		rf.updateVoteFor(args.CandidateId)
+		rf.switchState(Any, Follower, nil)
+		rf.resetElectionTimer()
+
+		DebugPretty(dVote, "S%d -> C%d GrantVote %v newTerm:%v", rf.me, args.CandidateId, reply.VoteGranted, rf.termAt.UnixMilli())
+		return nil
 	}
 
-	//  updated status according to the result vote , only vote to peers ,then reset election
-	if err := rf.funcWrapperWithStateProtect(func() error {
-		if rf.currentTerm == reply.Term {
-			reply.VoteGranted = true
-			rf.updateVoteFor(args.CandidateId)
-			rf.switchState(Any, Follower, nil)
-			rf.resetElectionTimer()
-			return nil
-		}
-		return fmt.Errorf("drop myself, may rpc is out-of-date curT:%d != prevT:%d", rf.currentTerm, reply.Term)
-	}, LevelRaftSM); err != nil {
-		DebugPretty(dVote, "S%d -> S%d RejectVote[chk log], msg: %v", rf.me, args.CandidateId, err.Error())
-	} else {
-		DebugPretty(dVote, "S%d -> S%d GrantVote atT:%d", rf.me, args.CandidateId, reply.Term)
+	if err := rf.funcWrapperWithStateProtect(termValidateFn, logUp2dateValidate, grantVote, func() error { rf.persist(); return nil }); err != nil {
+		DebugPretty(dVote, "S%d -> C%d Reject Vote, msg: %v", rf.me, args.CandidateId, err.Error())
 	}
 
 }
@@ -146,32 +134,22 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 }
 
 // Raft represent raft
-func (rf *Raft) ResponseVote(vote chan struct{}, voteCnt *int32, ctx context.Context, server int, args *RequestVoteArgs) {
-	rf.funcWrapperWithStateProtect(func() error {
-		DebugPretty(dVote, "S%d send vote(LI: %d LT: %d) -> S%d at: T%d(T%d)", rf.me, args.LastLogIndex, args.LastLogTerm, server, args.Term, rf.currentTerm)
-		return nil
-	}, LevelRaftSM)
+func (rf *Raft) IssueRequestVote(ctx context.Context, vote *int32, server int, args *RequestVoteArgs) {
 
-	ackFn := func() {
-		select {
-		case <-ctx.Done():
-			return
-		case <-vote:
-			return
-		case vote <- struct{}{}:
-		}
-	}
+	DebugPretty(dVote, "S%d ->S%d issue vote(LI: %d LT: %d) at: T%d(T%d)", rf.me, args.LastLogIndex, args.LastLogTerm, server, args.Term, rf.currentTerm)
 
 	reply := &RequestVoteReply{}
 	if !rf.sendRequestVote(server, args, reply) {
-		DebugPretty(dVote, "S%d -> S%d req vote net failed", rf.me, server)
 		return
 	}
 
-	if err := rf.funcWrapperWithStateProtect(func() error {
+	select {
+	case <-ctx.Done():
+		return
+	default:
+	}
 
-		// Once found outself term is smalller than the term that rpc returned, we should immediately convert to follower without any  questions
-		// So where we should pass `Any` but not `Candidate` to switchState()
+	termValidateFn := func() error {
 		if rf.currentTerm < reply.Term {
 			err := fmt.Errorf("chk term failed, curT:%d < rpcT:%d ", rf.currentTerm, reply.Term)
 			rf.switchState(Any, Follower, func() {
@@ -180,41 +158,34 @@ func (rf *Raft) ResponseVote(vote chan struct{}, voteCnt *int32, ctx context.Con
 			return err
 		}
 
-		if rf.currentTerm > reply.Term {
-			return fmt.Errorf("belated rpc response curT:%d > rpcT:%d", rf.currentTerm, reply.Term)
-		}
-		if rf.currentTerm > args.Term {
-			return fmt.Errorf("belated rpc response curT:%d > prevT:%d", rf.currentTerm, args.Term)
-		}
-
 		return nil
-	}, LevelRaftSM); err != nil {
-		DebugPretty(dVote, "S%d -> S%d req vote failed, msg: %s", rf.me, server, err.Error())
-		return
 	}
 
-	DebugPretty(dVote, "S%d -> S%d req vote, got response %v", rf.me, server, reply.VoteGranted)
+	rf.funcWrapperWithStateProtect(termValidateFn)
 
 	if reply.VoteGranted {
-		atomic.AddInt32(voteCnt, 1)
-	}
-	if atomic.LoadInt32(voteCnt) > int32(len(rf.peers)/2) {
-		ackFn()
+		DebugPretty(dVote, "S%d <- S%d Receive Vote", rf.me, server)
+		atomic.AddInt32(vote, 1)
 	}
 
 }
 
 // StartElection issue an vote rpc to all server in concurrency for performance when the server translation into candidate
-func (rf *Raft) StartElection(term int, elt time.Duration) {
+func (rf *Raft) StartElection() {
 	var (
-		voteCnt         int32         = 1
-		voteCh          chan struct{} = make(chan struct{})
-		timeout, cancel               = context.WithTimeout(context.Background(), elt)
+		voteCnt     int32 = 1
+		ctx, cancel       = context.WithTimeout(context.TODO(), 2*defaultMinEelectionTimeout)
 	)
+	defer cancel()
+	initFn := func() error {
+		rf.updateTerm(rf.currentTerm + 1)
+		rf.updateVoteFor(rf.me)
+		return nil
+	}
 
-	concurVoteFn := func() error {
+	issueVote := func() error {
 		args := RequestVoteArgs{
-			Term:         term,
+			Term:         rf.currentTerm,
 			CandidateId:  rf.me,
 			LastLogIndex: len(rf.log),
 			LastLogTerm:  0,
@@ -225,42 +196,36 @@ func (rf *Raft) StartElection(term int, elt time.Duration) {
 
 		for servIdex := range rf.peers {
 			if servIdex != rf.me {
-				go rf.ResponseVote(voteCh, &voteCnt, timeout, servIdex, &args)
+				go rf.IssueRequestVote(ctx, &voteCnt, servIdex, &args)
 			}
 		}
 		return nil
 	}
 
-	rf.funcWrapperWithStateProtect(concurVoteFn, LevelLogSS)
+	rf.funcWrapperWithStateProtect(initFn, issueVote)
 
-	select {
-	case <-timeout.Done():
-		cancel()
-		close(voteCh)
-		return
-	case <-voteCh:
-	}
-	cancel()
+	DebugPretty(dVote, "S%d Total got %d vote %v", rf.me, voteCnt, time.Now().UnixMilli())
 
-	rf.funcWrapperWithStateProtect(func() error {
-		if term < rf.currentTerm {
-			return fmt.Errorf("vote issue too old, i now T%d, oldT:%d", rf.currentTerm, term)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			if int(atomic.LoadInt32(&voteCnt)) > len(rf.peers)/2 {
+				rf.funcWrapperWithStateProtect(func() error { rf.switchState(Any, Leader, rf.reInitializeVolatitleState); return nil })
+				return
+			}
 		}
+		time.Sleep(defaultTickerPeriod)
+	}
 
-		DebugPretty(dVote, "S%d already got %d vote T:%d, cvt leader", rf.me, atomic.LoadInt32(&voteCnt), term)
-		return rf.switchState(Candidate, Leader, func() {
-			rf.funcWrapperWithStateProtect(rf.reInitializeVolatitleState, LevelLogSS)
-			rf.StartAppendEntries(rf.currentTerm)
-		})
-	}, LevelRaftSM)
 }
 
 // reInitializeVolatitleState represent reinitializevolatitlestate
-func (rf *Raft) reInitializeVolatitleState() error {
+func (rf *Raft) reInitializeVolatitleState() {
 	for sverIdex := range rf.peers {
 		rf.matchIndex[sverIdex] = 0
 		rf.nextIndex[sverIdex] = len(rf.log) + 1
 	}
 	rf.matchIndex[rf.me] = len(rf.log)
-	return nil
 }

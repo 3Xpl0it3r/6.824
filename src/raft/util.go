@@ -83,19 +83,15 @@ func init() {
 }
 
 // Raft represent raft
-func (rf *Raft) funcWrapperWithStateProtect(fn func() error, protectLevel RaftProtectLevel) error {
-	var err error
-	switch protectLevel {
-	case LevelRaftSM:
-		rf.mu.Lock()
-		err = fn()
-		rf.mu.Unlock()
-	case LevelLogSS:
-		rf.logMu.Lock()
-		err = fn()
-		rf.logMu.Unlock()
+func (rf *Raft) funcWrapperWithStateProtect(fns ...func() error) error {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	for _, fn := range fns {
+		if err := fn(); err != nil {
+			return err
+		}
 	}
-	return err
+	return nil
 }
 
 //go:inline
@@ -104,10 +100,11 @@ func randomizedElectionTimeout() time.Duration {
 }
 
 // Raft represent raft
-func (rf *Raft) switchState(from, to Role, stateFn func()) error {
+func (rf *Raft) switchState(from, to Role, stateFn func()) {
 
 	if from != Any && rf.role != from {
-		return fmt.Errorf("switch %s -> %s failed, expect: %d ,but got %d", from, to, from, rf.role)
+		err := fmt.Errorf("switch %s -> %s failed, expect: %d ,but got %d", from, to, from, rf.role)
+		panic(err)
 	}
 
 	// this is default config
@@ -117,7 +114,6 @@ func (rf *Raft) switchState(from, to Role, stateFn func()) error {
 	if stateFn != nil {
 		stateFn()
 	}
-	return nil
 }
 
 // Raft represent raft
