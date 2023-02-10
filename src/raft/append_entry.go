@@ -1,7 +1,9 @@
 package raft
 
 import (
+	"context"
 	"fmt"
+	"sync/atomic"
 	"time"
 )
 
@@ -86,7 +88,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 }
 
 // Raft represent raft
-func (rf *Raft) IssueRequestAppendEntries(server int, args AppendEntriesArgs) {
+func (rf *Raft) IssueRequestAppendEntries(count *int32, server int, args AppendEntriesArgs) {
 	reply := &AppendEntriesReply{}
 
 	DebugPretty(dLog, "S%d -> S%d Send (PLI:%d PLT:%d LC:%d LT:%d) Ent:%v %v", rf.me, server, args.PrevLogIndex, args.PrevLogTerm, args.LeaderCommit, args.Term, args.Entries, time.Now().UnixMilli())
@@ -142,11 +144,18 @@ func (rf *Raft) IssueRequestAppendEntries(server int, args AppendEntriesArgs) {
 
 	}
 
+	atomic.AddInt32(count, 1)
 	rf.funcWrapperWithStateProtect(termValidate, updateLogIndex)
+	DebugPretty(dLog, "S%d -> S%d Done AppEnt  %v", rf.me, server, time.Now().UnixMilli())
 }
 
 // StartAppendEntries issue an new AppendLogEntriesRPC witout raft state machined lock
 func (rf *Raft) StartAppendEntries() {
+	var (
+		count       int32
+		ctx, cancel = context.WithTimeout(context.Background(), defaultHeartbeatPeriod/2)
+	)
+	defer cancel()
 
 	concurApEnt := func() error {
 		args := AppendEntriesArgs{
@@ -173,7 +182,7 @@ func (rf *Raft) StartAppendEntries() {
 			}
 
 			// DebugPretty(dLeader, "S%d -> S%d  Sending PLI:%d PLT:%d N:%d LC:%d at T:%d- entries: %v - %v", rf.me, serverIdx, args.PrevLogIndex, args.PrevLogTerm, rf.nextIndex[serverIdx], rf.commitIndex, args.Term, args.Entries, time.Now().UnixMilli())
-			go rf.IssueRequestAppendEntries(serverIdx, args)
+			go rf.IssueRequestAppendEntries(&count, serverIdx, args)
 
 		}
 
@@ -183,6 +192,22 @@ func (rf *Raft) StartAppendEntries() {
 	}
 
 	rf.funcWrapperWithStateProtect(concurApEnt)
+
+	for {
+		select {
+		case <-ctx.Done():
+			goto END
+		default:
+			if atomic.LoadInt32(&count) > int32(len(rf.peers)/2) {
+				DebugPretty(dLeader, "S%d Send %d Success %d ", rf.me, atomic.LoadInt32(&count), time.Now().UnixMilli())
+				goto END
+			}
+		}
+		time.Sleep(defaultTickerPeriod / 10)
+	}
+END:
+	rf.funcWrapperWithStateProtect(func() error { rf.updateLeaderCommitIndexAndApplyLogs(); return nil })
+	DebugPretty(dLeader, "S%d Done Issue AppEnt RPC %d", rf.me, time.Now().UnixMilli())
 }
 
 // Raft represent raft
@@ -199,11 +224,12 @@ func (rf *Raft) updateLeaderCommitIndexAndApplyLogs() bool {
 			}
 			if majority > len(rf.peers)/2 {
 				rf.commitIndex = n
-				rf.applyLogEntry()
-				return true
+				DebugPretty(dCommit, "S%d Update Leader CMI to %d - %v", rf.me, rf.commitIndex, time.Now().UnixMilli())
+				break
 			}
 		}
 	}
+	rf.applyLogEntry()
 	return false
 }
 
@@ -238,7 +264,7 @@ func (rf *Raft) applyLogEntry() {
 			rf.applyCh <- msg
 			rf.lastApplied++
 		}
-		DebugPretty(dCommit, "S%d Applied %d logs, lastApplied:%d ", rf.me, n, rf.lastApplied)
+		DebugPretty(dCommit, "S%d Applied %d logs, lastApplied:%d -- %v ", rf.me, n, rf.lastApplied, time.Now().UnixMilli())
 	}
 }
 

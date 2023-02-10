@@ -241,11 +241,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		index = len(rf.log)
 		rf.matchIndex[rf.me]++
 		rf.nextIndex[rf.me]++
-		DebugPretty(dLog2, "S%d Start Append cmd %v,all:%v", rf.me, command, rf.log)
+		DebugPretty(dLog2, "S%d Start Append cmd,all: %d - %d ", rf.me, rf.log, time.Now().UnixMilli())
 		return nil
 	}
 
-	rf.funcWrapperWithStateProtect(leaderCheck, addLog, func() error { rf.persist(); return nil })
+	rf.funcWrapperWithStateProtect(leaderCheck, addLog)
 
 	return index, term, isLeader
 }
