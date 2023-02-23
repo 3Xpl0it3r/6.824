@@ -54,28 +54,32 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 		// if rps's term is smaller than current's term ,then return immediately
 		if rf.currentTerm > args.Term {
+			rf.persist()
 			return fmt.Errorf("rpc term is samller myself term, curT:%d > rpcT:%d", rf.currentTerm, args.Term)
 		}
 
 		reply.Term = rf.currentTerm
 
 		if rf.voteFor != VoteForNone {
+			rf.persist()
 			return fmt.Errorf("S%d already voteFor S%d(T:%d) != S%d(T:%d)", rf.me, rf.voteFor, rf.currentTerm, args.CandidateId, args.Term)
 		}
 		return nil
 	}
 
 	logUp2dateValidate := func() error {
-		lastLogIndex := len(rf.log)
+		lastLogIndex := len(rf.logs)
 
 		if lastLogIndex != 0 {
-			if args.LastLogTerm < rf.log[lastLogIndex-1].Term {
+			if args.LastLogTerm < rf.logs[lastLogIndex-1].Term {
 				// candidate's log lastLogTerm is smaller than myself's lastLogTerm
-				return fmt.Errorf("cmp LT, myLT:%d > rpcLT:%d", rf.log[lastLogIndex-1].Term, args.LastLogTerm)
+				rf.persist()
+				return fmt.Errorf("cmp LT, myLT:%d > rpcLT:%d", rf.logs[lastLogIndex-1].Term, args.LastLogTerm)
 			}
 
-			if args.LastLogTerm == rf.log[lastLogIndex-1].Term && lastLogIndex > args.LastLogIndex {
+			if args.LastLogTerm == rf.logs[lastLogIndex-1].Term && lastLogIndex > args.LastLogIndex {
 				// candidate's last log term is same as our last log's term ,but out log is logner, so candidate's log is not newer
+				rf.persist()
 				return fmt.Errorf("LT same, cmp LI, myLI:%d > rpcLI:%d", lastLogIndex, args.LastLogIndex)
 			}
 			// other case means candidate's log is newer than myself's log
@@ -184,14 +188,15 @@ func (rf *Raft) StartElection() {
 	}
 
 	issueVote := func() error {
+		rf.persist()
 		args := RequestVoteArgs{
 			Term:         rf.currentTerm,
 			CandidateId:  rf.me,
-			LastLogIndex: len(rf.log),
+			LastLogIndex: len(rf.logs),
 			LastLogTerm:  0,
 		}
-		if len(rf.log) != 0 {
-			args.LastLogTerm = rf.log[len(rf.log)-1].Term
+		if len(rf.logs) != 0 {
+			args.LastLogTerm = rf.logs[len(rf.logs)-1].Term
 		}
 
 		for servIdex := range rf.peers {
@@ -225,7 +230,7 @@ func (rf *Raft) StartElection() {
 func (rf *Raft) reInitializeVolatitleState() {
 	for sverIdex := range rf.peers {
 		rf.matchIndex[sverIdex] = 0
-		rf.nextIndex[sverIdex] = len(rf.log) + 1
+		rf.nextIndex[sverIdex] = len(rf.logs) + 1
 	}
-	rf.matchIndex[rf.me] = len(rf.log)
+	rf.matchIndex[rf.me] = len(rf.logs)
 }

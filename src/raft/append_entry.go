@@ -37,6 +37,7 @@ func (rf *Raft) RequestAppendEntries(args *AppendEntriesArgs, reply *AppendEntri
 		if rf.currentTerm > args.Term {
 			err := fmt.Errorf("chk term faied, curT:%d > rpcT:%d", rf.currentTerm, reply.Term)
 			reply.Term = rf.currentTerm
+			rf.persist()
 			return err
 		}
 
@@ -57,22 +58,24 @@ func (rf *Raft) RequestAppendEntries(args *AppendEntriesArgs, reply *AppendEntri
 		reply.NextIndex = rf.commitIndex + 1
 
 		if rf.commitIndex > args.PrevLogIndex {
+			rf.persist()
 			return fmt.Errorf("CMI:%d > PLI:%d(for commited log cannot be deleted)", rf.commitIndex, args.PrevLogIndex)
 		}
 
 		if ok := rf.findFollowerNextIndex(args); !ok {
+			rf.persist()
 			return fmt.Errorf("notice Leader update nextIndex=%d", reply.NextIndex)
 		}
 
 		// remove conflict log entries and then append new entries into local storage
-		rf.log = rf.log[0:args.PrevLogIndex]
-		rf.log = append(rf.log, args.Entries...)
+		rf.logs = rf.logs[0:args.PrevLogIndex]
+		rf.logs = append(rf.logs, args.Entries...)
 
 		// update follower commit index and apply log to statemachine if necessary
 		rf.updateFollowerCommitIndex(args)
 		rf.applyLogEntry()
 
-		DebugPretty(dLog, "S%d ->S%d Saved Logs[%d](PLI:%v PLT:%v) [LI:%d CI:%d] at:T%d  all:%v - %v", rf.me, args.LeaderId, len(args.Entries), args.PrevLogIndex, args.PrevLogTerm, rf.lastApplied, rf.commitIndex, reply.Term, len(rf.log), time.Now().UnixMilli())
+		DebugPretty(dLog, "S%d ->S%d Saved Logs[%d](PLI:%v PLT:%v) [LI:%d CI:%d] at:T%d  all:%v - %v", rf.me, args.LeaderId, len(args.Entries), args.PrevLogIndex, args.PrevLogTerm, rf.lastApplied, rf.commitIndex, reply.Term, len(rf.logs), time.Now().UnixMilli())
 
 		reply.Success = true
 		return nil
@@ -165,9 +168,11 @@ func (rf *Raft) StartAppendEntries() {
 			LeaderCommit: rf.commitIndex,
 		}
 
-		logCopy := make([]LogEntry, len(rf.log))
-		copy(logCopy, rf.log)
-		DebugPretty(dLeader, "S%d Issue AppEnt T:%d MI:%v NI:%v len(log):%v - %v", rf.me, rf.currentTerm, rf.matchIndex, rf.nextIndex, len(rf.log), time.Now().UnixMilli())
+		rf.persist() // 2C
+
+		logCopy := make([]LogEntry, len(rf.logs))
+		copy(logCopy, rf.logs)
+		DebugPretty(dLeader, "S%d Issue AppEnt T:%d MI:%v NI:%v len(log):%v - %v", rf.me, rf.currentTerm, rf.matchIndex, rf.nextIndex, len(rf.logs), time.Now().UnixMilli())
 		for serverIdx := range rf.peers {
 			if serverIdx == rf.me {
 				continue
@@ -177,7 +182,7 @@ func (rf *Raft) StartAppendEntries() {
 				args.PrevLogTerm = -1
 				args.Entries = logCopy
 			} else {
-				args.PrevLogTerm = rf.log[args.PrevLogIndex-1].Term
+				args.PrevLogTerm = rf.logs[args.PrevLogIndex-1].Term
 				args.Entries = logCopy[args.PrevLogIndex:]
 			}
 
@@ -212,14 +217,14 @@ END:
 
 // Raft represent raft
 func (rf *Raft) updateLeaderCommitIndexAndApplyLogs() bool {
-	if len(rf.log) == 0 {
+	if len(rf.logs) == 0 {
 		return false
 	}
 
-	for n := len(rf.log); n > rf.commitIndex; n-- {
+	for n := len(rf.logs); n > rf.commitIndex; n-- {
 		majority := 0
 		for sverIdx := range rf.peers {
-			if rf.matchIndex[sverIdx] >= n && rf.log[n-1].Term == rf.currentTerm {
+			if rf.matchIndex[sverIdx] >= n && rf.logs[n-1].Term == rf.currentTerm {
 				majority++
 			}
 			if majority > len(rf.peers)/2 {
@@ -238,8 +243,8 @@ func (rf *Raft) updateFollowerCommitIndex(args *AppendEntriesArgs) {
 	// if leader's commitIndex is larger than follower's commit
 	// then set outself commitIndex to min(len(rf.log), leader'CommitIndex)
 	if args.LeaderCommit > rf.commitIndex {
-		if args.LeaderCommit > len(rf.log) {
-			rf.commitIndex = len(rf.log)
+		if args.LeaderCommit > len(rf.logs) {
+			rf.commitIndex = len(rf.logs)
 		} else {
 			rf.commitIndex = args.LeaderCommit
 		}
@@ -250,11 +255,12 @@ func (rf *Raft) updateFollowerCommitIndex(args *AppendEntriesArgs) {
 // Raft represent raft
 func (rf *Raft) applyLogEntry() {
 	if rf.commitIndex > rf.lastApplied {
+		rf.persist()
 		n := rf.commitIndex - rf.lastApplied
 		for n = rf.lastApplied; n < rf.commitIndex; n++ {
 			msg := ApplyMsg{
 				CommandValid:  true,
-				Command:       rf.log[rf.lastApplied].Command,
+				Command:       rf.logs[rf.lastApplied].Command,
 				CommandIndex:  rf.lastApplied + 1,
 				SnapshotValid: false,
 				Snapshot:      []byte{},
@@ -276,14 +282,14 @@ func (rf *Raft) findFollowerNextIndex(args *AppendEntriesArgs) bool {
 	}
 
 	// follower日志更长,直接比较，比较失败设置nextIndex为
-	if len(rf.log) >= args.PrevLogIndex {
-		if rf.log[args.PrevLogIndex-1].Term == args.PrevLogTerm {
+	if len(rf.logs) >= args.PrevLogIndex {
+		if rf.logs[args.PrevLogIndex-1].Term == args.PrevLogTerm {
 			return true
 		}
 	}
 
 	// leader日志更长
-	if len(rf.log) < args.PrevLogIndex {
+	if len(rf.logs) < args.PrevLogIndex {
 		return false
 	}
 

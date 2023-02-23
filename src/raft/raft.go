@@ -20,12 +20,14 @@ package raft
 import (
 	//	"bytes"
 
+	"bytes"
 	"errors"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	//	"6.824/labgob"
+	"6.824/labgob"
 	"6.824/labrpc"
 )
 
@@ -119,7 +121,7 @@ type Raft struct {
 
 	logMu sync.Mutex
 	// fileds below are protected by logMu
-	log         []LogEntry //log entries ,each entry contains command for state machine, and term when entry was received by leader (first index is 1)
+	logs        []LogEntry //log entries ,each entry contains command for state machine, and term when entry was received by leader (first index is 1)
 	commitIndex int
 	lastApplied int
 	nextIndex   []int // for guess, used for performance
@@ -155,6 +157,12 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
+	writer := new(bytes.Buffer)
+	encoder := labgob.NewEncoder(writer)
+	encoder.Encode(rf.currentTerm)
+	encoder.Encode(rf.voteFor)
+	encoder.Encode(rf.logs)
+	rf.persister.SaveRaftState(writer.Bytes())
 }
 
 //
@@ -165,18 +173,19 @@ func (rf *Raft) readPersist(data []byte) {
 		return
 	}
 	// Your code here (2C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	reader := bytes.NewBuffer(data)
+	decoder := labgob.NewDecoder(reader)
+	var (
+		currentTerm int
+		voteFor     int
+		logs        []LogEntry
+	)
+	if decoder.Decode(&currentTerm) != nil || decoder.Decode(&voteFor) != nil || decoder.Decode(&logs) != nil {
+		panic("readPersist failed")
+	}
+	rf.currentTerm = currentTerm
+	rf.voteFor = voteFor
+	rf.logs = logs
 }
 
 //
@@ -234,14 +243,15 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 
 	addLog := func() error {
-		rf.log = append(rf.log, LogEntry{
+        rf.persist()
+		rf.logs = append(rf.logs, LogEntry{
 			Term:    term,
 			Command: command,
 		})
-		index = len(rf.log)
+		index = len(rf.logs)
 		rf.matchIndex[rf.me]++
 		rf.nextIndex[rf.me]++
-		DebugPretty(dLog2, "S%d Start Append cmd,all: %d - %d ", rf.me, rf.log, time.Now().UnixMilli())
+		DebugPretty(dLog2, "S%d Start Append cmd,all: %d - %d ", rf.me, rf.logs, time.Now().UnixMilli())
 		return nil
 	}
 
@@ -304,7 +314,7 @@ func (rf *Raft) StartFollower() {
 	rf.funcWrapperWithStateProtect(debugFn)
 
 	for !rf.elapseElectionTimeoutUntil(Follower, elt, func() { rf.switchState(Follower, Candidate, rf.resetElectionTimer) }) {
-		rf.applyLogEntry()
+		// rf.applyLogEntry()
 		time.Sleep(defaultTickerPeriod)
 	}
 
@@ -378,7 +388,7 @@ func (rf *Raft) elapseElectionTimeoutUntil(role Role, elt time.Duration, deferFn
 // Raft represent raft
 func (rf *Raft) checkCommitIndexAndApplyLog() bool {
 	rf.applyLogEntry()
-	return rf.commitIndex < len(rf.log)
+	return rf.commitIndex < len(rf.logs)
 }
 
 //
@@ -429,10 +439,10 @@ func (rf *Raft) initialization() {
 	rf.matchIndex = make([]int, len(rf.peers))
 
 	for sverIdex := range rf.peers {
-		rf.nextIndex[sverIdex] = len(rf.log) + 1
+		rf.nextIndex[sverIdex] = len(rf.logs) + 1
 		rf.matchIndex[sverIdex] = 0
 	}
-	rf.matchIndex[rf.me] = len(rf.log)
+	rf.matchIndex[rf.me] = len(rf.logs)
 
 }
 
