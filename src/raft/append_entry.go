@@ -177,6 +177,22 @@ func (rf *Raft) StartAppendEntries() {
 			if serverIdx == rf.me {
 				continue
 			}
+			// is this case
+			if args.PrevLogIndex < rf.lastIncludedIndex {
+                // DebugPretty(dSnap, "S%d -> S%d send snapshot, prevLogIndex: %d lastIncludeIndex:%d  logs:%v", rf.me, serverIdx, args.PrevLogIndex, rf.lastIncludedIndex, rf.logs)
+				// send issue append rpcs
+				rf.IssueInstallSnapshotRPC(serverIdx, SnapshotArgs{
+					Term:              rf.currentTerm,
+					LeaderId:          rf.me,
+					LastIncludedIndex: rf.lastIncludedIndex,
+					LastIncludedTerm:  rf.lastIncludedTerm,
+					Offset:            0,
+					Data:              rf.persister.ReadSnapshot(),
+					Done:              true,
+				})
+				continue
+			}
+
 			args.PrevLogIndex = rf.nextIndex[serverIdx] - 1
 			if args.PrevLogIndex == 0 {
 				args.PrevLogTerm = -1
@@ -186,7 +202,6 @@ func (rf *Raft) StartAppendEntries() {
 				args.Entries = logCopy[args.PrevLogIndex:]
 			}
 
-			// DebugPretty(dLeader, "S%d -> S%d  Sending PLI:%d PLT:%d N:%d LC:%d at T:%d- entries: %v - %v", rf.me, serverIdx, args.PrevLogIndex, args.PrevLogTerm, rf.nextIndex[serverIdx], rf.commitIndex, args.Term, args.Entries, time.Now().UnixMilli())
 			go rf.IssueRequestAppendEntries(&count, serverIdx, args)
 
 		}

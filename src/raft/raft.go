@@ -22,9 +22,13 @@ import (
 
 	"bytes"
 	"errors"
+	"log"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"net/http"
+	_ "net/http/pprof"
 
 	//	"6.824/labgob"
 	"6.824/labgob"
@@ -127,6 +131,8 @@ type Raft struct {
 	nextIndex   []int // for guess, used for performance
 	matchIndex  []int // used for safety
 
+	lastIncludedIndex int
+	lastIncludedTerm  int
 }
 
 // return currentTerm and whether this server
@@ -162,6 +168,8 @@ func (rf *Raft) persist() {
 	encoder.Encode(rf.currentTerm)
 	encoder.Encode(rf.voteFor)
 	encoder.Encode(rf.logs)
+	encoder.Encode(rf.lastIncludedIndex)
+	encoder.Encode(rf.lastIncludedTerm)
 	rf.persister.SaveRaftState(writer.Bytes())
 }
 
@@ -176,36 +184,21 @@ func (rf *Raft) readPersist(data []byte) {
 	reader := bytes.NewBuffer(data)
 	decoder := labgob.NewDecoder(reader)
 	var (
-		currentTerm int
-		voteFor     int
-		logs        []LogEntry
+		currentTerm       int
+		voteFor           int
+		logs              []LogEntry
+		lastIncludedIndex int
+		lastIncludedTerm  int
 	)
 	if decoder.Decode(&currentTerm) != nil || decoder.Decode(&voteFor) != nil || decoder.Decode(&logs) != nil {
 		panic("readPersist failed")
 	}
+	if decoder.Decode(&lastIncludedIndex) != nil || decoder.Decode(&lastIncludedTerm) != nil {
+		panic("read Raft Status failed")
+	}
 	rf.currentTerm = currentTerm
 	rf.voteFor = voteFor
 	rf.logs = logs
-}
-
-//
-// A service wants to switch to snapshot.  Only do so if Raft hasn't
-// have more recent info since it communicate the snapshot on applyCh.
-//
-func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
-
-	// Your code here (2D).
-
-	return true
-}
-
-// the service says it has created a snapshot that has
-// all info up to and including index. this means the
-// service no longer needs the log through (and including)
-// that index. Raft should now trim its log as much as possible.
-func (rf *Raft) Snapshot(index int, snapshot []byte) {
-	// Your code here (2D).
-
 }
 
 //
@@ -243,7 +236,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 
 	addLog := func() error {
-        rf.persist()
+		rf.persist()
 		rf.logs = append(rf.logs, LogEntry{
 			Term:    term,
 			Command: command,
@@ -251,7 +244,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		index = len(rf.logs)
 		rf.matchIndex[rf.me]++
 		rf.nextIndex[rf.me]++
-		DebugPretty(dLog2, "S%d Start Append cmd,all: %d - %d ", rf.me, rf.logs, time.Now().UnixMilli())
+		DebugPretty(dLog2, "S%d Start Append cmd,all: %d - %d ", rf.me, len(rf.logs), time.Now().UnixMilli())
 		return nil
 	}
 
@@ -404,6 +397,10 @@ func (rf *Raft) checkCommitIndexAndApplyLog() bool {
 //
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
+	go func() {
+		log.Println(http.ListenAndServe("localhost:6060", nil))
+	}()
+
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister
@@ -443,6 +440,9 @@ func (rf *Raft) initialization() {
 		rf.matchIndex[sverIdex] = 0
 	}
 	rf.matchIndex[rf.me] = len(rf.logs)
+
+	rf.lastIncludedIndex = 0
+	rf.lastIncludedTerm = 0
 
 }
 
