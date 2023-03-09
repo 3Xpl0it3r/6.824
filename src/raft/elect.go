@@ -40,7 +40,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.VoteGranted = false
 	DebugPretty(dVote, "S%d <- C%d Ask Vote (LI:%d LT:%d T:%d)", rf.me, args.CandidateId, args.LastLogIndex, args.LastLogTerm, args.Term)
 
-	termValidateFn := func() error {
+	termChecker := func() error {
 
 		// if rpc's term is larger than current term ,then set current term to rpc's term, then conver into follower
 		if rf.currentTerm < args.Term {
@@ -67,17 +67,22 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return nil
 	}
 
-	logUp2dateValidate := func() error {
-		lastLogIndex := len(rf.logs)
+	logChecker := func() error {
+		lastLogIndex := len(rf.logs) + rf.lastIncludedIndex
+		lastLogTerm := rf.lastIncludedTerm
+		if len(rf.logs) > 0 {
+			lastLogTerm = rf.logs[len(rf.logs)-1].Term
+		}
 
 		if lastLogIndex != 0 {
-			if args.LastLogTerm < rf.logs[lastLogIndex-1].Term {
+			// if args.LastLogTerm < rf.logs[lastLogIndex-1].Term {
+			if args.LastLogTerm < lastLogTerm {
 				// candidate's log lastLogTerm is smaller than myself's lastLogTerm
 				rf.persist()
-				return fmt.Errorf("cmp LT, myLT:%d > rpcLT:%d", rf.logs[lastLogIndex-1].Term, args.LastLogTerm)
+				return fmt.Errorf("cmp LT, myLT:%d > rpcLT:%d", lastLogTerm, args.LastLogTerm)
 			}
 
-			if args.LastLogTerm == rf.logs[lastLogIndex-1].Term && lastLogIndex > args.LastLogIndex {
+			if args.LastLogTerm == lastLogTerm && lastLogIndex > args.LastLogIndex {
 				// candidate's last log term is same as our last log's term ,but out log is logner, so candidate's log is not newer
 				rf.persist()
 				return fmt.Errorf("LT same, cmp LI, myLI:%d > rpcLI:%d", lastLogIndex, args.LastLogIndex)
@@ -87,7 +92,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return nil
 	}
 
-	grantVote := func() error {
+	voteHandler := func() error {
 		reply.VoteGranted = true
 		rf.updateVoteFor(args.CandidateId)
 		rf.switchState(Any, Follower, nil)
@@ -97,7 +102,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return nil
 	}
 
-	if err := rf.funcWrapperWithStateProtect(termValidateFn, logUp2dateValidate, grantVote, func() error { rf.persist(); return nil }); err != nil {
+	if err := rf.funcWrapperWithStateProtect(termChecker, logChecker, voteHandler, func() error { rf.persist(); return nil }); err != nil {
 		DebugPretty(dVote, "S%d -> C%d Reject Vote, msg: %v", rf.me, args.CandidateId, err.Error())
 	}
 
@@ -192,11 +197,13 @@ func (rf *Raft) StartElection() {
 		args := RequestVoteArgs{
 			Term:         rf.currentTerm,
 			CandidateId:  rf.me,
-			LastLogIndex: len(rf.logs),
+			LastLogIndex: len(rf.logs) + rf.lastIncludedIndex,
 			LastLogTerm:  0,
 		}
 		if len(rf.logs) != 0 {
 			args.LastLogTerm = rf.logs[len(rf.logs)-1].Term
+		} else {
+			args.LastLogTerm = rf.lastIncludedTerm
 		}
 
 		for servIdex := range rf.peers {
@@ -209,14 +216,13 @@ func (rf *Raft) StartElection() {
 
 	rf.funcWrapperWithStateProtect(initFn, issueVote)
 
-	DebugPretty(dVote, "S%d Total got %d vote %v", rf.me, voteCnt, time.Now().UnixMilli())
-
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		default:
 			if int(atomic.LoadInt32(&voteCnt)) > len(rf.peers)/2 {
+				DebugPretty(dLeader, "S%d Total got %d vote Ctv -> Leader %v", rf.me, voteCnt, time.Now().UnixMilli())
 				rf.funcWrapperWithStateProtect(func() error { rf.switchState(Any, Leader, rf.reInitializeVolatitleState); return nil })
 				return
 			}
@@ -230,7 +236,7 @@ func (rf *Raft) StartElection() {
 func (rf *Raft) reInitializeVolatitleState() {
 	for sverIdex := range rf.peers {
 		rf.matchIndex[sverIdex] = 0
-		rf.nextIndex[sverIdex] = len(rf.logs) + 1
+		rf.nextIndex[sverIdex] = len(rf.logs) + 1 + rf.lastIncludedIndex
 	}
-	rf.matchIndex[rf.me] = len(rf.logs)
+	rf.matchIndex[rf.me] = len(rf.logs) + rf.lastIncludedIndex
 }

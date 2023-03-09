@@ -569,18 +569,25 @@ func (cfg *config) wait(index int, n int, startTerm int) interface{} {
 // to simplify the early Lab 2B tests.
 func cost1(prevTime time.Time) uint64 {
 	return uint64(time.Now().Sub(prevTime).Milliseconds())
-
 }
+
 func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 	t0 := time.Now()
 	var rf *Raft
 	defer func() {
-		DebugPretty(dInfo, "S%d --- Begin cfg.one(%v) - cost %d", rf.me, cmd, time.Since(t0)/time.Millisecond)
+		DebugPretty(dInfo, "S%d --- Begin cfg.one(%d) - cost %d", rf.me, cmd, time.Since(t0)/time.Millisecond)
+		cfg.mu.Lock()
+		for server, logs := range cfg.logs {
+			DebugPretty(dInfo, "S%d CommitLogs: %v", server, logs)
+		}
+		cfg.mu.Unlock()
 	}()
 	starts := 0
+	index := -1
+	var nd int
+	var cmd1 interface{}
 	for time.Since(t0).Seconds() < 10 && cfg.checkFinished() == false {
 		// try all the servers, maybe one is the leader.
-		index := -1
 		for si := 0; si < cfg.n; si++ {
 			starts = (starts + 1) % cfg.n
 			cfg.mu.Lock()
@@ -604,7 +611,7 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 			anotherCount := 0
 
 			for time.Since(t1).Seconds() < 2 {
-				nd, cmd1 := cfg.nCommitted(index)
+				nd, cmd1 = cfg.nCommitted(index)
 				if nd > 0 && nd >= expectedServers {
 					// committed
 					if cmd1 == cmd {
@@ -617,14 +624,15 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 			}
 
 			if retry == false {
-				cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
+				cfg.t.Fatalf("one(%v) failed to reach agreement at Index:%d we expected: %v, actual %d, %v", cmd, index, cmd, nd, cmd1)
 			}
 		} else {
 			time.Sleep(50 * time.Millisecond)
 		}
 	}
 	if cfg.checkFinished() == false {
-		cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
+		cfg.t.Fatalf("one(%v) failed to reach agreement at Index:%d we expected: %v, actual %d, %v", cmd, index, cmd, nd, cmd1)
+		// cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
 	}
 	return -1
 }

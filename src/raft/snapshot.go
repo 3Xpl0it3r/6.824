@@ -25,13 +25,15 @@ type SnapshotReply struct {
 
 // InstallSnapshotRPC [#TODO](should add some comments)
 func (rf *Raft) InstallSnapshotRPC(args *SnapshotArgs, reply *SnapshotReply) {
-	DebugPretty(dSnap, "S%d <- S%d Rcv Snapshot", rf.me, args.LeaderId)
 
-	termvalidater := func() error {
+	termChecker := func() error {
+		DebugPretty(dSnap, "S%d <- S%d Install Snap (rpc.LLI:%d rpc.LLT:%d)(rf.LLI:%d rf.LLT:%d LEN:%d)", rf.me, args.LeaderId, args.LastIncludedIndex, args.LastIncludedTerm, rf.lastIncludedIndex, rf.lastIncludedTerm, len(rf.logs))
+
 		if args.Term < rf.currentTerm {
 			rf.persist()
 			reply.Term = rf.currentTerm
 			err := fmt.Errorf("chk term failed, curT:%d rpcT:%d", rf.currentTerm, args.Term)
+			DebugPretty(dSnap, "S%d <- S%d Reject snap, %v", rf.me, args.LeaderId, err)
 			return err
 		}
 		// if ourself term is smaller than rpc's term, then we should immediately translate to follower whatever role we now in
@@ -46,29 +48,39 @@ func (rf *Raft) InstallSnapshotRPC(args *SnapshotArgs, reply *SnapshotReply) {
 		return nil
 	}
 
-	snapshotHandler := func() error {
-		rf.persistSnapshot(args.LastIncludedIndex, args.Data)
-		if !args.Done {
-			rf.persist()
-			return nil
+	var msgs []ApplyMsg
+
+	installSps := func() error {
+		if args.LastIncludedIndex < rf.lastIncludedIndex {
+			panic("impossible")
 		}
+
+		fixedFindex := args.LastIncludedIndex - rf.lastIncludedIndex
+
+		if fixedFindex <= len(rf.logs) {
+			rf.logs = rf.logs[fixedFindex:]
+		}
+		if fixedFindex > len(rf.logs) {
+			rf.logs = rf.logs[:0]
+		}
+
 		rf.lastIncludedIndex = args.LastIncludedIndex
 		rf.lastIncludedTerm = args.LastIncludedTerm
-		if len(rf.logs)+rf.lastIncludedIndex > args.LastIncludedIndex {
-			if rf.logs[args.LastIncludedIndex-1].Term == args.LastIncludedTerm {
-				rf.logs = rf.logs[args.LastIncludedIndex:]
-			}
-		}
-		if rf.commitIndex < args.LastIncludedIndex {
-			rf.commitIndex = args.LastIncludedIndex
-		}
-		if rf.lastApplied < args.LastIncludedIndex {
-			rf.lastApplied = args.LastIncludedIndex
-		}
+
+		rf.persistSnapshot(args.Data)
+
+		// we should install snapshot to statemachine throuhg send an applyMsg that the msg type is snapshot
+		rf.applyEntryToStateMachine(&msgs)
+
+		DebugPretty(dSnap, "S%d Installed Snapsot: rf.LLI:%d rf.LLT:%d rf.CMI:%d len(log)=%d", rf.me, rf.lastIncludedIndex, rf.lastIncludedTerm, rf.commitIndex, len(rf.logs))
 		return nil
 	}
 
-	rf.funcWrapperWithStateProtect(termvalidater, snapshotHandler, func() error { rf.persist(); return nil })
+	rf.funcWrapperWithStateProtect(termChecker, installSps, func() error { rf.persist(); return nil })
+
+	for _, msg := range msgs {
+		rf.applyCh <- msg
+	}
 }
 
 // sendInstallSnapshotRPC [#TODO](should add some comments)
@@ -79,10 +91,10 @@ func (rf *Raft) sendInstallSnapshotRPC(server int, args *SnapshotArgs, reply *Sn
 
 // IssueInstallSnapshotRPC [#TODO](should add some comments)
 func (rf *Raft) IssueInstallSnapshotRPC(server int, args SnapshotArgs) {
-	DebugPretty(dSnap, "S%d -> S%d Snapshot", rf.me, server)
+	DebugPretty(dSnap, "S%d -> S%d Snapshot LLI:%d LLT:%d", rf.me, server, args.LastIncludedIndex, args.LastIncludedTerm)
 
 	reply := SnapshotReply{}
-	if rf.sendInstallSnapshotRPC(server, &args, &reply) {
+	if !rf.sendInstallSnapshotRPC(server, &args, &reply) {
 		return
 	}
 
@@ -96,8 +108,11 @@ func (rf *Raft) IssueInstallSnapshotRPC(server int, args SnapshotArgs) {
 			rf.switchState(Any, Follower, func() {
 				rf.updateTerm(reply.Term)
 			})
+			DebugPretty(dSnap, "S%d -> S%d Snapfailed %v", rf.me, server, err)
 			return err
 		}
+		rf.nextIndex[server] = args.LastIncludedIndex + 1
+		DebugPretty(dSnap, "S%d -> S%d Send Snapshot Done NX:%v", rf.me, server, args.LastIncludedIndex)
 		return nil
 	}
 
@@ -120,24 +135,31 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 // service no longer needs the log through (and including)
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
-
-	rf.persistSnapshot(index, snapshot)
-	// rf.funcWrapperWithStateProtect(func() error { rf.persistSnapshot(index, snapshot); return nil })
-
-
+	rf.funcWrapperWithStateProtect(func() error { rf.takeSnapshot(index, snapshot); return nil })
 }
 
-// persistSnapshot [#TODO](should add some comments)
-func (rf *Raft) persistSnapshot(index int, snapshot []byte) {
-	if rf.role == Leader {
-		DebugPretty(dSnap, "S%d Begin Snapshot at %d(LLI:%d LLT:%d), rf.logs:%v", index, rf.lastIncludedIndex, rf.lastIncludedTerm, rf.logs)
-	}
+// takeSnapshot [#TODO](should add some comments)
+func (rf *Raft) takeSnapshot(index int, snapshot []byte) {
+
 	if rf.lastIncludedIndex == index {
 		return
 	}
+	logLen := len(rf.logs)
+
+	// truncated logs
 	rf.lastIncludedTerm = rf.logs[index-rf.lastIncludedIndex-1].Term
-	rf.lastIncludedIndex = index
 	rf.logs = rf.logs[index-rf.lastIncludedIndex:]
+	rf.lastIncludedIndex = index
+
+	// install snapshot and raft state into persisent
+	rf.persistSnapshot(snapshot)
+
+	// debug logs
+	DebugPretty(dSnap, "S%d Done Snapshot at %d(LLI:%d LLT:%d), rf.logs:%d -> %d", rf.me, index, rf.lastIncludedIndex, rf.lastIncludedTerm, logLen, len(rf.logs))
+}
+
+// only ally snapshot to local state machine
+func (rf *Raft) persistSnapshot(snapshot []byte) {
 
 	writer := new(bytes.Buffer)
 	encoder := labgob.NewEncoder(writer)
@@ -148,8 +170,4 @@ func (rf *Raft) persistSnapshot(index int, snapshot []byte) {
 	encoder.Encode(rf.lastIncludedTerm)
 
 	rf.persister.SaveStateAndSnapshot(writer.Bytes(), snapshot)
-
-	if rf.role == Leader {
-		DebugPretty(dSnap, "S%d Complete Snapshot at %d(LLI:%d LLT:%d), rf.logs:%v", index, rf.lastIncludedIndex, rf.lastIncludedTerm, rf.logs)
-	}
 }

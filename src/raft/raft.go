@@ -22,12 +22,10 @@ import (
 
 	"bytes"
 	"errors"
-	"log"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"net/http"
 	_ "net/http/pprof"
 
 	//	"6.824/labgob"
@@ -199,6 +197,8 @@ func (rf *Raft) readPersist(data []byte) {
 	rf.currentTerm = currentTerm
 	rf.voteFor = voteFor
 	rf.logs = logs
+	rf.lastIncludedIndex = lastIncludedIndex
+	rf.lastIncludedTerm = lastIncludedTerm
 }
 
 //
@@ -241,10 +241,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			Term:    term,
 			Command: command,
 		})
-		index = len(rf.logs)
+		index = len(rf.logs) + rf.lastIncludedIndex
 		rf.matchIndex[rf.me]++
 		rf.nextIndex[rf.me]++
-		DebugPretty(dLog2, "S%d Start Append cmd,all: %d - %d ", rf.me, len(rf.logs), time.Now().UnixMilli())
+		DebugPretty(dLog2, "S%d Start Append cmd %d at %d,all: %d - %d ", rf.me, command, index, len(rf.logs), time.Now().UnixMilli())
 		return nil
 	}
 
@@ -378,12 +378,6 @@ func (rf *Raft) elapseElectionTimeoutUntil(role Role, elt time.Duration, deferFn
 	return false
 }
 
-// Raft represent raft
-func (rf *Raft) checkCommitIndexAndApplyLog() bool {
-	rf.applyLogEntry()
-	return rf.commitIndex < len(rf.logs)
-}
-
 //
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
@@ -397,10 +391,6 @@ func (rf *Raft) checkCommitIndexAndApplyLog() bool {
 //
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
-	go func() {
-		log.Println(http.ListenAndServe("localhost:6060", nil))
-	}()
-
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister
@@ -442,7 +432,7 @@ func (rf *Raft) initialization() {
 	rf.matchIndex[rf.me] = len(rf.logs)
 
 	rf.lastIncludedIndex = 0
-	rf.lastIncludedTerm = 0
+	rf.lastIncludedTerm = -1
 
 }
 

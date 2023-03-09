@@ -31,7 +31,7 @@ type AppendEntriesReply struct {
 func (rf *Raft) RequestAppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	DebugPretty(dLog, "S%d receive AppEnt <- S%d (PLI:%d PLT:%d, LCMI:%d, LT:%d) - %d", rf.me, args.LeaderId, args.PrevLogIndex, args.PrevLogTerm, args.LeaderCommit, args.Term, time.Now().UnixMilli())
 
-	termValidate := func() error {
+	termChecker := func() error {
 
 		// if rpcs term is smaller than ourself's term ,then we shoud reconized this request is illegal, then drop it
 		if rf.currentTerm > args.Term {
@@ -54,8 +54,13 @@ func (rf *Raft) RequestAppendEntries(args *AppendEntriesArgs, reply *AppendEntri
 		return nil
 	}
 
+	var msgs []ApplyMsg
 	logHandler := func() error {
-		reply.NextIndex = rf.commitIndex + 1
+		if rf.commitIndex < rf.lastIncludedIndex {
+			reply.NextIndex = rf.lastIncludedIndex + 1
+		} else {
+			reply.NextIndex = rf.commitIndex + 1
+		}
 
 		if rf.commitIndex > args.PrevLogIndex {
 			rf.persist()
@@ -67,21 +72,27 @@ func (rf *Raft) RequestAppendEntries(args *AppendEntriesArgs, reply *AppendEntri
 			return fmt.Errorf("notice Leader update nextIndex=%d", reply.NextIndex)
 		}
 
-		// remove conflict log entries and then append new entries into local storage
-		rf.logs = rf.logs[0:args.PrevLogIndex]
+		fixedIndex := args.PrevLogIndex - rf.lastIncludedIndex
+
+		// findFollerNextIndex make sure that fixedIndex > 0, and fixedIndex in [0, len(rf.logs))
+		rf.logs = rf.logs[:fixedIndex]
 		rf.logs = append(rf.logs, args.Entries...)
 
-		// update follower commit index and apply log to statemachine if necessary
-		rf.updateFollowerCommitIndex(args)
-		rf.applyLogEntry()
-
 		DebugPretty(dLog, "S%d ->S%d Saved Logs[%d](PLI:%v PLT:%v) [LI:%d CI:%d] at:T%d  all:%v - %v", rf.me, args.LeaderId, len(args.Entries), args.PrevLogIndex, args.PrevLogTerm, rf.lastApplied, rf.commitIndex, reply.Term, len(rf.logs), time.Now().UnixMilli())
+
+		// update follower commit index and apply log to statemachine if necessary
+		rf.applyEntryToStateMachine(&msgs)
+		rf.updateFollowerCommitIndex(args)
 
 		reply.Success = true
 		return nil
 	}
 
-	rf.funcWrapperWithStateProtect(termValidate, logHandler, func() error { rf.persist(); return nil })
+	rf.funcWrapperWithStateProtect(termChecker, logHandler, func() error { rf.persist(); return nil })
+
+	for _, msg := range msgs {
+		rf.applyCh <- msg
+	}
 }
 
 // Raft represent raft
@@ -160,6 +171,8 @@ func (rf *Raft) StartAppendEntries() {
 	)
 	defer cancel()
 
+	var msgs []ApplyMsg
+
 	concurApEnt := func() error {
 		args := AppendEntriesArgs{
 			Term:         rf.currentTerm,
@@ -172,16 +185,19 @@ func (rf *Raft) StartAppendEntries() {
 
 		logCopy := make([]LogEntry, len(rf.logs))
 		copy(logCopy, rf.logs)
-		DebugPretty(dLeader, "S%d Issue AppEnt T:%d MI:%v NI:%v len(log):%v - %v", rf.me, rf.currentTerm, rf.matchIndex, rf.nextIndex, len(rf.logs), time.Now().UnixMilli())
+		DebugPretty(dLeader, "S%d Issue AppEnt T:%d MI:%v NI:%v LII:%d, CMI:%d len(log):%v - %v", rf.me, rf.currentTerm, rf.matchIndex, rf.nextIndex, rf.lastIncludedIndex, rf.commitIndex, len(rf.logs), time.Now().UnixMilli())
 		for serverIdx := range rf.peers {
 			if serverIdx == rf.me {
 				continue
 			}
-			// is this case
+			args.PrevLogIndex = rf.nextIndex[serverIdx] - 1
+
+			// If args.PrevLogIndex < rf.lastIncludedIndex it means there some logs that will be send to follower are located at snapshots,
+			// In this case we should send leader's snapshot to follower first;
 			if args.PrevLogIndex < rf.lastIncludedIndex {
-                // DebugPretty(dSnap, "S%d -> S%d send snapshot, prevLogIndex: %d lastIncludeIndex:%d  logs:%v", rf.me, serverIdx, args.PrevLogIndex, rf.lastIncludedIndex, rf.logs)
+				// DebugPretty(dSnap, "S%d -> S%d send snapshot, prevLogIndex: %d lastIncludeIndex:%d  logs:%v", rf.me, serverIdx, args.PrevLogIndex, rf.lastIncludedIndex, rf.logs)
 				// send issue append rpcs
-				rf.IssueInstallSnapshotRPC(serverIdx, SnapshotArgs{
+				go rf.IssueInstallSnapshotRPC(serverIdx, SnapshotArgs{
 					Term:              rf.currentTerm,
 					LeaderId:          rf.me,
 					LastIncludedIndex: rf.lastIncludedIndex,
@@ -193,25 +209,29 @@ func (rf *Raft) StartAppendEntries() {
 				continue
 			}
 
-			args.PrevLogIndex = rf.nextIndex[serverIdx] - 1
-			if args.PrevLogIndex == 0 {
-				args.PrevLogTerm = -1
+			// args.PrevlogIndex >= rf.lastIncludeIndex
+			if args.PrevLogIndex == rf.lastIncludedIndex || len(rf.logs) == 0 {
+				args.PrevLogTerm = rf.lastIncludedTerm
 				args.Entries = logCopy
-			} else {
-				args.PrevLogTerm = rf.logs[args.PrevLogIndex-1].Term
-				args.Entries = logCopy[args.PrevLogIndex:]
+			} else { // len(rf.log) > 0 && args.PrevLogIndex > rf.lastIncldueIndex (args.PrevLoIndex <= rf.lastIncludeIndex + rf.log.len)
+				args.Entries = logCopy[args.PrevLogIndex-rf.lastIncludedIndex:]
+				args.PrevLogTerm = logCopy[args.PrevLogIndex-rf.lastIncludedIndex-1].Term
 			}
 
 			go rf.IssueRequestAppendEntries(&count, serverIdx, args)
-
 		}
 
-		rf.updateLeaderCommitIndexAndApplyLogs()
+		rf.applyEntryToStateMachine(&msgs)
 
 		return nil
 	}
 
 	rf.funcWrapperWithStateProtect(concurApEnt)
+
+	// apply to statemachine and send rpc can be parallel for performance
+	for _, msg := range msgs {
+		rf.applyCh <- msg
+	}
 
 	for {
 		select {
@@ -226,30 +246,31 @@ func (rf *Raft) StartAppendEntries() {
 		time.Sleep(defaultTickerPeriod / 10)
 	}
 END:
-	rf.funcWrapperWithStateProtect(func() error { rf.updateLeaderCommitIndexAndApplyLogs(); return nil })
+	rf.funcWrapperWithStateProtect(func() error { rf.updateLeaderCommitIndex(); return nil })
 	DebugPretty(dLeader, "S%d Done Issue AppEnt RPC %d", rf.me, time.Now().UnixMilli())
 }
 
 // Raft represent raft
-func (rf *Raft) updateLeaderCommitIndexAndApplyLogs() bool {
+func (rf *Raft) updateLeaderCommitIndex() bool {
 	if len(rf.logs) == 0 {
 		return false
 	}
 
-	for n := len(rf.logs); n > rf.commitIndex; n-- {
+	// DebugPretty(dInfo, "S%d Begin Update CMI: LII:%d CMI:%d len(log)=%d, MatchIndex:%v | log:%v,  CT:%d", rf.me, rf.lastIncludedIndex, rf.commitIndex, len(rf.logs), rf.matchIndex, rf.logs, rf.currentTerm)
+
+	for n := len(rf.logs) + rf.lastIncludedIndex; n > rf.commitIndex && n > rf.lastIncludedIndex; n-- {
 		majority := 0
 		for sverIdx := range rf.peers {
-			if rf.matchIndex[sverIdx] >= n && rf.logs[n-1].Term == rf.currentTerm {
+			if rf.matchIndex[sverIdx] >= n && rf.logs[n-rf.lastIncludedIndex-1].Term == rf.currentTerm {
 				majority++
 			}
 			if majority > len(rf.peers)/2 {
+				DebugPretty(dCommit, "S%d Update CMI %d -> %d ", rf.me, rf.commitIndex, n)
 				rf.commitIndex = n
-				DebugPretty(dCommit, "S%d Update Leader CMI to %d - %v", rf.me, rf.commitIndex, time.Now().UnixMilli())
 				break
 			}
 		}
 	}
-	rf.applyLogEntry()
 	return false
 }
 
@@ -257,57 +278,90 @@ func (rf *Raft) updateLeaderCommitIndexAndApplyLogs() bool {
 func (rf *Raft) updateFollowerCommitIndex(args *AppendEntriesArgs) {
 	// if leader's commitIndex is larger than follower's commit
 	// then set outself commitIndex to min(len(rf.log), leader'CommitIndex)
+	oldCmi := rf.commitIndex
 	if args.LeaderCommit > rf.commitIndex {
-		if args.LeaderCommit > len(rf.logs) {
-			rf.commitIndex = len(rf.logs)
+		if args.LeaderCommit > len(rf.logs)+rf.lastIncludedIndex {
+			rf.commitIndex = len(rf.logs) + rf.lastIncludedIndex
 		} else {
 			rf.commitIndex = args.LeaderCommit
 		}
-		DebugPretty(dCommit, "S%d uppdate commitInex to %d", rf.me, rf.commitIndex)
+		DebugPretty(dCommit, "S%d (LCMI:%d CMI:%d LenLog:%d)uppdate commitInex to %d", rf.me, args.LeaderCommit, oldCmi, len(rf.logs), rf.commitIndex)
 	}
 }
 
-// Raft represent raft
-func (rf *Raft) applyLogEntry() {
+// applyEntryToStateMachine apply log entry to state machine
+func (rf *Raft) applyEntryToStateMachine(entries *[]ApplyMsg) {
+	if rf.lastApplied < rf.lastIncludedIndex {
+		rf.lastApplied = rf.lastIncludedIndex
+	}
+
+	if rf.commitIndex < rf.lastApplied {
+		*entries = append(*entries, ApplyMsg{
+			CommandValid:  false,
+			Command:       nil,
+			CommandIndex:  0,
+			SnapshotValid: true,
+			Snapshot:      rf.persister.ReadSnapshot(),
+			SnapshotTerm:  rf.lastIncludedTerm,
+			SnapshotIndex: rf.lastIncludedIndex,
+		})
+		DebugPretty(dCommit, "S%d Applied Snapshot, lastApplied: %d, CurLogSize:%d", rf.me, rf.lastApplied, len(rf.logs))
+		return
+	}
+
+	DebugPretty(dInfo, "S%d Ready Apply CMI:%d LII:%d LAI:%d LenLog:%d", rf.me, rf.commitIndex, rf.lastIncludedIndex, rf.lastApplied, len(rf.logs))
 	if rf.commitIndex > rf.lastApplied {
-		rf.persist()
-		n := rf.commitIndex - rf.lastApplied
-		for n = rf.lastApplied; n < rf.commitIndex; n++ {
+		var count int = 0
+		// n := rf.commitIndex - rf.lastApplied
+		for n := rf.lastApplied; n < rf.commitIndex; n++ {
 			msg := ApplyMsg{
-				CommandValid:  true,
-				Command:       rf.logs[rf.lastApplied].Command,
+				CommandValid: true,
+				// Command:       rf.logs[rf.lastApplied-rf.lastIncludedIndex].Command,
+				Command:       rf.logs[n-rf.lastIncludedIndex].Command,
 				CommandIndex:  rf.lastApplied + 1,
 				SnapshotValid: false,
 				Snapshot:      []byte{},
 				SnapshotTerm:  0,
 				SnapshotIndex: 0,
 			}
-			rf.applyCh <- msg
+			*entries = append(*entries, msg)
 			rf.lastApplied++
+			count++
 		}
-		DebugPretty(dCommit, "S%d Applied %d logs, lastApplied:%d -- %v ", rf.me, n, rf.lastApplied, time.Now().UnixMilli())
+		rf.persist()
+		DebugPretty(dCommit, "S%d Applied %d logs, lastApplied:%d -curLog:%d- %v ", rf.me, count, rf.lastApplied, len(rf.logs), time.Now().UnixMilli())
 	}
 }
 
-// Raft represent raft
+// findFollowerNextIndex return flase if log doesn't contain an entry at prevLogIndex whoes term matches prevLogTerm
 func (rf *Raft) findFollowerNextIndex(args *AppendEntriesArgs) bool {
-	// case leader 是空,PLI 0, follower 一堆没用数据
-	if args.PrevLogIndex == 0 {
-		return true
+	fixedIndex := args.PrevLogIndex - rf.lastIncludedIndex
+
+	if fixedIndex < 0 {
+		panic("this is not possible")
 	}
 
-	// follower日志更长,直接比较，比较失败设置nextIndex为
-	if len(rf.logs) >= args.PrevLogIndex {
-		if rf.logs[args.PrevLogIndex-1].Term == args.PrevLogTerm {
+	if fixedIndex == 0 { // args.PrevLogIndex
+		if args.PrevLogTerm == rf.lastIncludedTerm {
 			return true
 		}
+		panic("this is impossible")
 	}
 
-	// leader日志更长
-	if len(rf.logs) < args.PrevLogIndex {
+	if fixedIndex > len(rf.logs) {
 		return false
 	}
 
-	return false
+	if fixedIndex == len(rf.logs) {
+		if rf.logs[fixedIndex-1].Term == args.PrevLogTerm {
+			return true
+		}
+		return false
+	}
 
+	if rf.logs[fixedIndex-1].Term == args.PrevLogTerm {
+		return true
+	}
+
+	return false
 }
