@@ -574,8 +574,9 @@ func cost1(prevTime time.Time) uint64 {
 func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 	t0 := time.Now()
 	var rf *Raft
+	var count int = 0
 	defer func() {
-		DebugPretty(dInfo, "S%d --- Begin cfg.one(%d) - cost %d", rf.me, cmd, time.Since(t0)/time.Millisecond)
+        DebugPretty(dInfo, "S%d --- Begin cfg.one(%d) tryCount: %d - cost %d", rf.me, cmd,count, time.Since(t0)/time.Millisecond)
 		cfg.mu.Lock()
 		for server, logs := range cfg.logs {
 			DebugPretty(dInfo, "S%d CommitLogs: %v", server, logs)
@@ -587,6 +588,7 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 	var nd int
 	var cmd1 interface{}
 	for time.Since(t0).Seconds() < 10 && cfg.checkFinished() == false {
+		count += 1
 		// try all the servers, maybe one is the leader.
 		for si := 0; si < cfg.n; si++ {
 			starts = (starts + 1) % cfg.n

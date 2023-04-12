@@ -80,9 +80,8 @@ func (rf *Raft) RequestAppendEntries(args *AppendEntriesArgs, reply *AppendEntri
 
 		DebugPretty(dLog, "S%d ->S%d Saved Logs[%d](PLI:%v PLT:%v) [LI:%d CI:%d] at:T%d  all:%v - %v", rf.me, args.LeaderId, len(args.Entries), args.PrevLogIndex, args.PrevLogTerm, rf.lastApplied, rf.commitIndex, reply.Term, len(rf.logs), time.Now().UnixMilli())
 
-		// update follower commit index and apply log to statemachine if necessary
-		rf.applyEntryToStateMachine(&msgs)
 		rf.updateFollowerCommitIndex(args)
+		rf.applyEntryToStateMachine(&msgs)
 
 		reply.Success = true
 		return nil
@@ -93,6 +92,8 @@ func (rf *Raft) RequestAppendEntries(args *AppendEntriesArgs, reply *AppendEntri
 	for _, msg := range msgs {
 		rf.applyCh <- msg
 	}
+
+	DebugPretty(dLog, "S%d Exit receive AppEnt <- S%d (PLI:%d PLT:%d, LCMI:%d, LT:%d) - %d", rf.me, args.LeaderId, args.PrevLogIndex, args.PrevLogTerm, args.LeaderCommit, args.Term, time.Now().UnixMilli())
 }
 
 // Raft represent raft
@@ -171,8 +172,6 @@ func (rf *Raft) StartAppendEntries() {
 	)
 	defer cancel()
 
-	var msgs []ApplyMsg
-
 	concurApEnt := func() error {
 		args := AppendEntriesArgs{
 			Term:         rf.currentTerm,
@@ -190,6 +189,7 @@ func (rf *Raft) StartAppendEntries() {
 			if serverIdx == rf.me {
 				continue
 			}
+
 			args.PrevLogIndex = rf.nextIndex[serverIdx] - 1
 
 			// If args.PrevLogIndex < rf.lastIncludedIndex it means there some logs that will be send to follower are located at snapshots,
@@ -221,17 +221,12 @@ func (rf *Raft) StartAppendEntries() {
 			go rf.IssueRequestAppendEntries(&count, serverIdx, args)
 		}
 
-		rf.applyEntryToStateMachine(&msgs)
-
 		return nil
 	}
 
 	rf.funcWrapperWithStateProtect(concurApEnt)
 
 	// apply to statemachine and send rpc can be parallel for performance
-	for _, msg := range msgs {
-		rf.applyCh <- msg
-	}
 
 	for {
 		select {
@@ -243,11 +238,20 @@ func (rf *Raft) StartAppendEntries() {
 				goto END
 			}
 		}
-		time.Sleep(defaultTickerPeriod / 10)
+		time.Sleep(defaultTickerPeriod)
 	}
 END:
-	rf.funcWrapperWithStateProtect(func() error { rf.updateLeaderCommitIndex(); return nil })
-	DebugPretty(dLeader, "S%d Done Issue AppEnt RPC %d", rf.me, time.Now().UnixMilli())
+	var msgs []ApplyMsg
+	rf.funcWrapperWithStateProtect(func() error {
+		rf.updateLeaderCommitIndex()
+		rf.applyEntryToStateMachine(&msgs)
+		return nil
+	})
+	for _, msg := range msgs {
+		rf.applyCh <- msg
+	}
+
+	DebugPretty(dLeader, "S%d Done Start AppEnt RPC %d", rf.me, time.Now().UnixMilli())
 }
 
 // Raft represent raft
@@ -285,7 +289,7 @@ func (rf *Raft) updateFollowerCommitIndex(args *AppendEntriesArgs) {
 		} else {
 			rf.commitIndex = args.LeaderCommit
 		}
-		DebugPretty(dCommit, "S%d (LCMI:%d CMI:%d LenLog:%d)uppdate commitInex to %d", rf.me, args.LeaderCommit, oldCmi, len(rf.logs), rf.commitIndex)
+		DebugPretty(dCommit, "S%d UpdateCMI (LCMI:%d CMI:%d LenLog:%d) -> %d", rf.me, args.LeaderCommit, oldCmi, len(rf.logs), rf.commitIndex)
 	}
 }
 

@@ -39,6 +39,7 @@ func (rf *Raft) InstallSnapshotRPC(args *SnapshotArgs, reply *SnapshotReply) {
 		// if ourself term is smaller than rpc's term, then we should immediately translate to follower whatever role we now in
 		rf.switchState(Any, Follower, func() {
 			if rf.currentTerm < args.Term {
+				DebugPretty(dTerm, "S%d Recv Snap Update Term T%d -> T%d", rf.me, rf.currentTerm, args.Term)
 				rf.updateTerm(args.Term)
 			}
 		})
@@ -48,9 +49,10 @@ func (rf *Raft) InstallSnapshotRPC(args *SnapshotArgs, reply *SnapshotReply) {
 		return nil
 	}
 
-	var msgs []ApplyMsg
-
 	installSps := func() error {
+		if rf.commitIndex >= args.LastIncludedIndex {
+			return nil
+		}
 		if args.LastIncludedIndex < rf.lastIncludedIndex {
 			panic("impossible")
 		}
@@ -69,18 +71,25 @@ func (rf *Raft) InstallSnapshotRPC(args *SnapshotArgs, reply *SnapshotReply) {
 
 		rf.persistSnapshot(args.Data)
 
-		// we should install snapshot to statemachine throuhg send an applyMsg that the msg type is snapshot
-		rf.applyEntryToStateMachine(&msgs)
+		rf.applyCh <- ApplyMsg{
+			CommandValid:  false,
+			Command:       nil,
+			CommandIndex:  0,
+			SnapshotValid: true,
+			Snapshot:      args.Data,
+			SnapshotTerm:  rf.lastIncludedTerm,
+			SnapshotIndex: rf.lastIncludedIndex,
+		}
 
-		DebugPretty(dSnap, "S%d Installed Snapsot: rf.LLI:%d rf.LLT:%d rf.CMI:%d len(log)=%d", rf.me, rf.lastIncludedIndex, rf.lastIncludedTerm, rf.commitIndex, len(rf.logs))
+		// we should install snapshot to statemachine throuhg send an applyMsg that the msg type is snapshot
+		// rf.applyEntryToStateMachine(&msgs)
+
+		DebugPretty(dSnap, "S%d Installed Snapsot: rf.LII:%d rf.LIT:%d rf.CMI:%d len(log)=%d", rf.me, rf.lastIncludedIndex, rf.lastIncludedTerm, rf.commitIndex, len(rf.logs))
 		return nil
 	}
 
 	rf.funcWrapperWithStateProtect(termChecker, installSps, func() error { rf.persist(); return nil })
 
-	for _, msg := range msgs {
-		rf.applyCh <- msg
-	}
 }
 
 // sendInstallSnapshotRPC [#TODO](should add some comments)

@@ -34,7 +34,7 @@ import (
 )
 
 const (
-	defaultTickerPeriod        time.Duration = 10 * time.Millisecond
+	defaultTickerPeriod        time.Duration = 1 * time.Millisecond
 	defaultMinEelectionTimeout time.Duration = 150 * time.Millisecond
 	defaultHeartbeatPeriod     time.Duration = 100 * time.Millisecond
 )

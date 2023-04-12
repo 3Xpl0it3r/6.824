@@ -283,7 +283,7 @@ func TestFailAgree2B(t *testing.T) {
 
 	cfg.begin("Test (2B): agreement after follower reconnects")
 
-	cfg.one(101, servers, false)
+	cfg.one(101, servers, false) 
 
 	// disconnect one follower from the network.
 	leader := cfg.checkOneLeader()
@@ -1169,6 +1169,69 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 			cfg.one(rand.Int(), servers, true)
 			leader1 = cfg.checkOneLeader()
 		}
+	}
+	cfg.end()
+}
+
+func cost(t0, t1 time.Time, msg string) {
+	DebugPretty(dInfo, "S0 --Location: %v , Cost: %d   Total: %d", msg, time.Now().Sub(t1)/time.Millisecond, time.Now().Sub(t0)/time.Millisecond)
+}
+
+func snapcommonDebug(t *testing.T, name string, disconnect bool, reliable bool, crash bool) {
+	var (
+		t0 time.Time = time.Now()
+		t1 time.Time
+	)
+	iters := 1
+	servers := 3
+	cfg := make_config(t, servers, !reliable, true)
+	defer cfg.cleanup()
+
+	cfg.begin(name)
+
+	t1 = time.Now()
+	cfg.one(-1, servers, true) // 389
+	leader1 := cfg.checkOneLeader() //  固定消耗450
+	cost(t0, t1, "1195, cfg.one and checkerOneLeader")  // 3-4任期 880
+
+	for i := 0; i < iters; i++ {
+		victim := (leader1 + 1) % servers
+		sender := leader1
+		if i%3 == 1 {
+			sender = (leader1 + 1) % servers
+			victim = leader1
+		}
+		t1 = time.Now()		
+        DebugPretty(dError, "S%d 第 %d 次 Disconnect", victim, i)
+		cfg.disconnect(victim)
+		cfg.one(100*i+100, servers-1, true)
+		cost(t0, t1, "1208, disconnect and cfg.one")  // 
+
+		// perhaps send enough to get a snapshot
+		nn := (SnapShotInterval / 2) + (rand.Int() % SnapShotInterval)
+		t1 = time.Now()
+		for i := 0; i < nn; i++ {
+			cfg.rafts[sender].Start(i)
+		}
+		cost(t0, t1, fmt.Sprintf("1216, Start %d logs", nn))   // 一个ren
+
+		t1 = time.Now()
+		cfg.one(100*i+100+1, servers-1, true)
+		cost(t0, t1, "1220 cfg.one")
+
+		if cfg.LogSize() >= MAXLOGSIZE {
+			cfg.t.Fatalf("Log size too large")
+		}
+		// reconnect a follower, who maybe behind and
+		// needs to rceive a snapshot to catch up.
+		t1 = time.Now()
+		cfg.connect(victim)
+		cfg.one(100*i+100+2, servers, true)
+		cost(t0, t1, "1230, connect and cfg.one")
+
+		t1 = time.Now()
+		leader1 = cfg.checkOneLeader()
+		cost(t0, t1, "1234, checkOneLeader")
 	}
 	cfg.end()
 }

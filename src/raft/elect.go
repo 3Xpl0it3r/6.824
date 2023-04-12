@@ -226,8 +226,8 @@ func (rf *Raft) StartElection() {
 				rf.funcWrapperWithStateProtect(func() error { rf.switchState(Any, Leader, rf.reInitializeVolatitleState); return nil })
 				return
 			}
+			time.Sleep(defaultTickerPeriod)
 		}
-		time.Sleep(defaultTickerPeriod)
 	}
 
 }
