@@ -148,10 +148,8 @@ func TestBasicAgree2B(t *testing.T) {
 	cfg.end()
 }
 
-//
 // check, based on counting bytes of RPCs, that
 // each command is sent to each peer just once.
-//
 func TestRPCBytes2B(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false, false)
@@ -183,9 +181,7 @@ func TestRPCBytes2B(t *testing.T) {
 	cfg.end()
 }
 
-//
 // test just failure of followers.
-//
 func For2023TestFollowerFailure2B(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false, false)
@@ -230,9 +226,7 @@ func For2023TestFollowerFailure2B(t *testing.T) {
 	cfg.end()
 }
 
-//
 // test just failure of leaders.
-//
 func For2023TestLeaderFailure2B(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false, false)
@@ -272,10 +266,8 @@ func For2023TestLeaderFailure2B(t *testing.T) {
 	cfg.end()
 }
 
-//
 // test that a follower participates after
 // disconnect and re-connect.
-//
 func TestFailAgree2B(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false, false)
@@ -283,7 +275,7 @@ func TestFailAgree2B(t *testing.T) {
 
 	cfg.begin("Test (2B): agreement after follower reconnects")
 
-	cfg.one(101, servers, false) 
+	cfg.one(101, servers, false)
 
 	// disconnect one follower from the network.
 	leader := cfg.checkOneLeader()
@@ -804,7 +796,6 @@ func TestPersist32C(t *testing.T) {
 	cfg.end()
 }
 
-//
 // Test the scenarios described in Figure 8 of the extended Raft paper. Each
 // iteration asks a leader, if there is one, to insert a command in the Raft
 // log.  If there is a leader, that leader will fail quickly with a high
@@ -813,7 +804,6 @@ func TestPersist32C(t *testing.T) {
 // alive servers isn't enough to form a majority, perhaps start a new server.
 // The leader in a new term may try to finish replicating log entries that
 // haven't been committed yet.
-//
 func TestFigure82C(t *testing.T) {
 	servers := 5
 	cfg := make_config(t, servers, false, false)
@@ -1190,9 +1180,9 @@ func snapcommonDebug(t *testing.T, name string, disconnect bool, reliable bool, 
 	cfg.begin(name)
 
 	t1 = time.Now()
-	cfg.one(-1, servers, true) // 389
-	leader1 := cfg.checkOneLeader() //  固定消耗450
-	cost(t0, t1, "1195, cfg.one and checkerOneLeader")  // 3-4任期 880
+	cfg.one(-1, servers, true)                         // 389
+	leader1 := cfg.checkOneLeader()                    //  固定消耗450
+	cost(t0, t1, "1195, cfg.one and checkerOneLeader") // 3-4任期 880
 
 	for i := 0; i < iters; i++ {
 		victim := (leader1 + 1) % servers
@@ -1201,11 +1191,11 @@ func snapcommonDebug(t *testing.T, name string, disconnect bool, reliable bool, 
 			sender = (leader1 + 1) % servers
 			victim = leader1
 		}
-		t1 = time.Now()		
-        DebugPretty(dError, "S%d 第 %d 次 Disconnect", victim, i)
+		t1 = time.Now()
+		DebugPretty(dError, "S%d 第 %d 次 Disconnect", victim, i)
 		cfg.disconnect(victim)
 		cfg.one(100*i+100, servers-1, true)
-		cost(t0, t1, "1208, disconnect and cfg.one")  // 
+		cost(t0, t1, "1208, disconnect and cfg.one") //
 
 		// perhaps send enough to get a snapshot
 		nn := (SnapShotInterval / 2) + (rand.Int() % SnapShotInterval)
@@ -1213,7 +1203,7 @@ func snapcommonDebug(t *testing.T, name string, disconnect bool, reliable bool, 
 		for i := 0; i < nn; i++ {
 			cfg.rafts[sender].Start(i)
 		}
-		cost(t0, t1, fmt.Sprintf("1216, Start %d logs", nn))   // 一个ren
+		cost(t0, t1, fmt.Sprintf("1216, Start %d logs", nn)) // 一个ren
 
 		t1 = time.Now()
 		cfg.one(100*i+100+1, servers-1, true)
@@ -1257,11 +1247,9 @@ func TestSnapshotInstallUnCrash2D(t *testing.T) {
 	snapcommon(t, "Test (2D): install snapshots (unreliable+crash)", false, false, true)
 }
 
-//
 // do the servers persist the snapshots, and
 // restart using snapshot along with the
 // tail of the log?
-//
 func TestSnapshotAllCrash2D(t *testing.T) {
 	servers := 3
 	iters := 5

@@ -128,10 +128,8 @@ func (rf *Raft) IssueInstallSnapshotRPC(server int, args SnapshotArgs) {
 	rf.funcWrapperWithStateProtect(termValidate)
 }
 
-//
 // A service wants to switch to snapshot.  Only do so if Raft hasn't
 // have more recent info since it communicate the snapshot on applyCh.
-//
 func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
 
 	// Your code here (2D).
@@ -144,7 +142,15 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 // service no longer needs the log through (and including)
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
-	rf.funcWrapperWithStateProtect(func() error { rf.takeSnapshot(index, snapshot); return nil })
+	DebugPretty(dSnap, "S%d ready snapshot", rf.me)
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	DebugPretty(dSnap, "S%d begin snapshot", rf.me)
+	if rf.role == Candidate {
+		return
+	}
+	rf.takeSnapshot(index, snapshot)
+	DebugPretty(dSnap, "S%d end snapshot", rf.me)
 }
 
 // takeSnapshot [#TODO](should add some comments)

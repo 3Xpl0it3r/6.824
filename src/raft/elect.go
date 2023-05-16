@@ -1,20 +1,15 @@
 package raft
 
 import (
-	"context"
 	"fmt"
-	"sync/atomic"
-	"time"
 )
 
 const (
 	VoteForNone = -1
 )
 
-//
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
-//
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
 	Term         int // candidate's term
@@ -23,92 +18,95 @@ type RequestVoteArgs struct {
 	LastLogTerm  int // term of candidate's last log term
 }
 
-//
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
-//
 type RequestVoteReply struct {
 	// Your data here (2A).
 	Term        int  // currentTerm, for candidate to update itself
 	VoteGranted bool // true means candidate received vote
 }
 
-//
 // example RequestVote RPC handler.
-//
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	reply.VoteGranted = false
-	DebugPretty(dVote, "S%d <- C%d Ask Vote (LI:%d LT:%d T:%d)", rf.me, args.CandidateId, args.LastLogIndex, args.LastLogTerm, args.Term)
 
-	termChecker := func() error {
+	rf.mu.Lock()
 
-		// if rpc's term is larger than current term ,then set current term to rpc's term, then conver into follower
-		if rf.currentTerm < args.Term {
-			oldT := rf.currentTerm
-			rf.switchState(Any, Follower, func() {
-				rf.updateTerm(args.Term)
-				rf.updateVoteFor(VoteForNone)
-			})
-			DebugPretty(dWarn, "S%d <- C%d req vote, curT:%d < rpcT:%d cvt follower newT:%d voteFor:%d", rf.me, args.CandidateId, oldT, args.Term, rf.currentTerm, rf.voteFor)
-		}
-
-		// if rps's term is smaller than current's term ,then return immediately
-		if rf.currentTerm > args.Term {
-			rf.persist()
-			return fmt.Errorf("rpc term is samller myself term, curT:%d > rpcT:%d", rf.currentTerm, args.Term)
-		}
-
+	defer func() {
 		reply.Term = rf.currentTerm
+		rf.persist()
+		rf.mu.Unlock()
+	}()
 
-		if rf.voteFor != VoteForNone {
-			rf.persist()
-			return fmt.Errorf("S%d already voteFor S%d(T:%d) != S%d(T:%d)", rf.me, rf.voteFor, rf.currentTerm, args.CandidateId, args.Term)
-		}
-		return nil
+	reply.VoteGranted = false
+	// DebugPretty(dVote, "S%d <- C%d Ask Vote (LI:%d LT:%d T:%d)", rf.me, args.CandidateId, args.LastLogIndex, args.LastLogTerm, args.Term)
+
+	if !rf.validateTerm(args.Term, true, true) {
+		DebugPretty(dVote, "S%d <- C%d, reject (LI: %d, LT:%d T:%d)", rf.me, args.CandidateId, args.LastLogIndex, args.LastLogTerm, args.Term)
+		return
 	}
 
-	logChecker := func() error {
-		lastLogIndex := len(rf.logs) + rf.lastIncludedIndex
-		lastLogTerm := rf.lastIncludedTerm
-		if len(rf.logs) > 0 {
-			lastLogTerm = rf.logs[len(rf.logs)-1].Term
-		}
-
-		if lastLogIndex != 0 {
-			// if args.LastLogTerm < rf.logs[lastLogIndex-1].Term {
-			if args.LastLogTerm < lastLogTerm {
-				// candidate's log lastLogTerm is smaller than myself's lastLogTerm
-				rf.persist()
-				return fmt.Errorf("cmp LT, myLT:%d > rpcLT:%d", lastLogTerm, args.LastLogTerm)
-			}
-
-			if args.LastLogTerm == lastLogTerm && lastLogIndex > args.LastLogIndex {
-				// candidate's last log term is same as our last log's term ,but out log is logner, so candidate's log is not newer
-				rf.persist()
-				return fmt.Errorf("LT same, cmp LI, myLI:%d > rpcLI:%d", lastLogIndex, args.LastLogIndex)
-			}
-			// other case means candidate's log is newer than myself's log
-		}
-		return nil
+	if rf.voteFor != VoteForNone {
+		DebugPretty(dVote, "S%d <- C%d, reject, has vote to %d", rf.me, args.CandidateId, rf.voteFor)
+		return
 	}
 
-	voteHandler := func() error {
+	if err := rf.validateCandiatesLogIsUpdate(args); err != nil {
+		DebugPretty(dVote, "S%d <- C%d, reject, %v", rf.me, args.CandidateId, err.Error())
+		return
+	}
+
+	rf.switchState(Any, Follower, func() {
 		reply.VoteGranted = true
 		rf.updateVoteFor(args.CandidateId)
-		rf.switchState(Any, Follower, nil)
 		rf.resetElectionTimer()
 
-		DebugPretty(dVote, "S%d -> C%d GrantVote %v newTerm:%v", rf.me, args.CandidateId, reply.VoteGranted, rf.termAt.UnixMilli())
-		return nil
+	})
+
+	DebugPretty(dVote, "S%d -> C%d GrantVote %v newTerm:%v", rf.me, args.CandidateId, reply.VoteGranted, rf.termAt.UnixMilli())
+
+}
+
+// StartElection issue an vote rpc to all server in concurrency for performance when the server translation into candidate
+func (rf *Raft) StartElection() {
+	rf.updateTerm(rf.currentTerm + 1)
+	rf.updateVoteFor(rf.me)
+	rf.voteOkCnt = 1
+
+	rf.persist()
+
+	args := RequestVoteArgs{
+		Term:         rf.currentTerm,
+		CandidateId:  rf.me,
+		LastLogIndex: len(rf.logs) + rf.lastIncludedIndex,
+		LastLogTerm:  0,
 	}
 
-	if err := rf.funcWrapperWithStateProtect(termChecker, logChecker, voteHandler, func() error { rf.persist(); return nil }); err != nil {
-		DebugPretty(dVote, "S%d -> C%d Reject Vote, msg: %v", rf.me, args.CandidateId, err.Error())
+	if len(rf.logs) != 0 {
+		args.LastLogTerm = rf.logs[len(rf.logs)-1].Term
+	} else {
+		args.LastLogTerm = rf.lastIncludedTerm
+	}
+
+	for servIdex := range rf.peers {
+		if servIdex != rf.me {
+			go rf.IssueRequestVote(servIdex, &args)
+		}
+	}
+	DebugPretty(dVote, "S%d end election ", rf.me)
+}
+
+// Raft represent raft
+func (rf *Raft) IssueRequestVote(server int, args *RequestVoteArgs) {
+
+	DebugPretty(dVote, "S%d ->S%d issue vote(LI: %d LT: %d) at: T%d", rf.me, server, args.LastLogIndex, args.LastLogTerm, args.Term)
+
+	reply := &RequestVoteReply{}
+	if rf.sendRequestVote(server, args, reply) {
+		rf.handleVoteResponse(server, reply)
 	}
 
 }
 
-//
 // example code to send a RequestVote RPC to a server.
 // server is the index of the target server in rf.peers[].
 // expects RPC arguments in args.
@@ -136,97 +134,25 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // capitalized all field names in structs passed over RPC, and
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
-//
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	return ok
 }
 
-// Raft represent raft
-func (rf *Raft) IssueRequestVote(ctx context.Context, vote *int32, server int, args *RequestVoteArgs) {
+// handleVoteResponse [#TODO](should add some comments)
+func (rf *Raft) handleVoteResponse(server int, reply *RequestVoteReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
-	DebugPretty(dVote, "S%d ->S%d issue vote(LI: %d LT: %d) at: T%d(T%d)", rf.me, args.LastLogIndex, args.LastLogTerm, server, args.Term, rf.currentTerm)
-
-	reply := &RequestVoteReply{}
-	if !rf.sendRequestVote(server, args, reply) {
+	if rf.validateTerm(reply.Term, false, false) == false {
 		return
 	}
-
-	select {
-	case <-ctx.Done():
-		return
-	default:
-	}
-
-	termValidateFn := func() error {
-		if rf.currentTerm < reply.Term {
-			err := fmt.Errorf("chk term failed, curT:%d < rpcT:%d ", rf.currentTerm, reply.Term)
-			rf.switchState(Any, Follower, func() {
-				rf.updateTerm(reply.Term)
-			})
-			return err
-		}
-
-		return nil
-	}
-
-	rf.funcWrapperWithStateProtect(termValidateFn)
 
 	if reply.VoteGranted {
-		DebugPretty(dVote, "S%d <- S%d Receive Vote", rf.me, server)
-		atomic.AddInt32(vote, 1)
-	}
-
-}
-
-// StartElection issue an vote rpc to all server in concurrency for performance when the server translation into candidate
-func (rf *Raft) StartElection() {
-	var (
-		voteCnt     int32 = 1
-		ctx, cancel       = context.WithTimeout(context.TODO(), 2*defaultMinEelectionTimeout)
-	)
-	defer cancel()
-	initFn := func() error {
-		rf.updateTerm(rf.currentTerm + 1)
-		rf.updateVoteFor(rf.me)
-		return nil
-	}
-
-	issueVote := func() error {
-		rf.persist()
-		args := RequestVoteArgs{
-			Term:         rf.currentTerm,
-			CandidateId:  rf.me,
-			LastLogIndex: len(rf.logs) + rf.lastIncludedIndex,
-			LastLogTerm:  0,
-		}
-		if len(rf.logs) != 0 {
-			args.LastLogTerm = rf.logs[len(rf.logs)-1].Term
-		} else {
-			args.LastLogTerm = rf.lastIncludedTerm
-		}
-
-		for servIdex := range rf.peers {
-			if servIdex != rf.me {
-				go rf.IssueRequestVote(ctx, &voteCnt, servIdex, &args)
-			}
-		}
-		return nil
-	}
-
-	rf.funcWrapperWithStateProtect(initFn, issueVote)
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-			if int(atomic.LoadInt32(&voteCnt)) > len(rf.peers)/2 {
-				DebugPretty(dLeader, "S%d Total got %d vote Ctv -> Leader %v", rf.me, voteCnt, time.Now().UnixMilli())
-				rf.funcWrapperWithStateProtect(func() error { rf.switchState(Any, Leader, rf.reInitializeVolatitleState); return nil })
-				return
-			}
-			time.Sleep(defaultTickerPeriod)
+		rf.voteOkCnt += 1
+		if rf.voteOkCnt > int(len(rf.peers)/2) && rf.role != Leader {
+			DebugPretty(dVote, "S%d Win,Cvt to leader ", rf.me)
+			rf.switchState(Candidate, Leader, rf.reInitializeVolatitleState)
 		}
 	}
 
@@ -239,4 +165,51 @@ func (rf *Raft) reInitializeVolatitleState() {
 		rf.nextIndex[sverIdex] = len(rf.logs) + 1 + rf.lastIncludedIndex
 	}
 	rf.matchIndex[rf.me] = len(rf.logs) + rf.lastIncludedIndex
+}
+
+// logCompare [#TODO](should add some comments)
+func (rf *Raft) validateCandiatesLogIsUpdate(args *RequestVoteArgs) error {
+	lastLogIndex := len(rf.logs) + rf.lastIncludedIndex
+	lastLogTerm := rf.lastIncludedTerm
+
+	if len(rf.logs) > 0 {
+		lastLogTerm = rf.logs[len(rf.logs)-1].Term
+	}
+
+	if lastLogIndex != 0 {
+		// if args.LastLogTerm < rf.logs[lastLogIndex-1].Term {
+		if args.LastLogTerm < lastLogTerm { // candidate's log lastLogTerm is smaller than myself's lastLogTerm
+			// rf.persist() // 需要持久化么?
+			return fmt.Errorf("cmp LT, myLT:%d > rpcLT:%d", lastLogTerm, args.LastLogTerm)
+		}
+
+		if args.LastLogTerm == lastLogTerm && lastLogIndex > args.LastLogIndex { // candidate's last log term is same as our last log's term ,but out log is logner, so candidate's log is not newer
+			// rf.persist() // 需要持久化么？
+			return fmt.Errorf("LT same, cmp LI, myLI:%d > rpcLI:%d", lastLogIndex, args.LastLogIndex)
+
+		}
+		// other case means candidate's log is newer than myself's log
+	}
+	return nil
+}
+
+// validateTerm [#TODO](should add some comments)
+func (rf *Raft) validateTerm(term int, isVote, needPersist bool) bool {
+	if rf.currentTerm < term {
+		rf.switchState(Any, Follower, func() {
+			rf.updateTerm(term)
+			if isVote {
+				rf.updateVoteFor(VoteForNone)
+			}
+		})
+		return true
+	}
+
+	if rf.currentTerm > term {
+		if needPersist {
+			rf.persist()
+		}
+		return false
+	}
+	return true
 }

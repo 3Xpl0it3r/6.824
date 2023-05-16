@@ -34,7 +34,7 @@ import (
 )
 
 const (
-	defaultTickerPeriod        time.Duration = 1 * time.Millisecond
+	defaultTickerPeriod        time.Duration = 10 * time.Millisecond
 	defaultMinEelectionTimeout time.Duration = 150 * time.Millisecond
 	defaultHeartbeatPeriod     time.Duration = 100 * time.Millisecond
 )
@@ -77,7 +77,6 @@ type LogEntry struct {
 	Command interface{}
 }
 
-//
 // as each Raft peer becomes aware that successive log entries are
 // committed, the peer should send an ApplyMsg to the service (or
 // tester) on the same server, via the applyCh passed to Make(). set
@@ -87,7 +86,6 @@ type LogEntry struct {
 // in part 2D you'll want to send other kinds of messages (e.g.,
 // snapshots) on the applyCh, but set CommandValid to false for these
 // other uses.
-//
 type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
@@ -100,9 +98,7 @@ type ApplyMsg struct {
 	SnapshotIndex int
 }
 
-//
 // A Go object implementing a single Raft peer.
-//
 type Raft struct {
 	mu        sync.Mutex          // Lock to protect shared access to this peer's state
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
@@ -118,8 +114,11 @@ type Raft struct {
 	// blew are protected by rf.mu
 	currentTerm int // latest term server has seen (initialized to 0 first boot)
 	voteFor     int //candidateId that received vote in current term(or null if none)
-	role        Role
-	termAt      time.Time
+	voteOkCnt   int
+	bastOkCnt   int
+
+	role   Role
+	termAt time.Time
 
 	logMu sync.Mutex
 	// fileds below are protected by logMu
@@ -147,11 +146,9 @@ func (rf *Raft) GetState() (int, bool) {
 	return term, isleader
 }
 
-//
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.
 // see paper's Figure 2 for a description of what should be persistent.
-//
 func (rf *Raft) persist() {
 	// Your code here (2C).
 	// Example:
@@ -171,9 +168,7 @@ func (rf *Raft) persist() {
 	rf.persister.SaveRaftState(writer.Bytes())
 }
 
-//
 // restore previously persisted state.
-//
 func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
@@ -201,7 +196,6 @@ func (rf *Raft) readPersist(data []byte) {
 	rf.lastIncludedTerm = lastIncludedTerm
 }
 
-//
 // te service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
 // server isn't the leader, returns false. otherwise start the
@@ -214,7 +208,6 @@ func (rf *Raft) readPersist(data []byte) {
 // if it's ever committed. the second return value is the current
 // term. the third return value is true if this server believes it is
 // the leader.
-//
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	index := -1
@@ -230,7 +223,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		term = rf.currentTerm
 		isLeader = rf.role == Leader
 		if !isLeader {
-			return errors.New("S%d I am leader, Start failed")
+			return errors.New("S%d I am not leader, Start failed")
 		}
 		return nil
 	}
@@ -244,7 +237,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		index = len(rf.logs) + rf.lastIncludedIndex
 		rf.matchIndex[rf.me]++
 		rf.nextIndex[rf.me]++
-		DebugPretty(dLog2, "S%d Start Append cmd %d at %d,all: %d - %d ", rf.me, command, index, len(rf.logs), time.Now().UnixMilli())
+		DebugPretty(dLog2, "S%d Start Append cmd %v at %d,all: %d - %d ", rf.me, command, index, len(rf.logs), time.Now().UnixMilli())
 		return nil
 	}
 
@@ -253,7 +246,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	return index, term, isLeader
 }
 
-//
 // the tester doesn't halt goroutines created by Raft after each test,
 // but it does call the Kill() method. your code can use killed() to
 // check whether Kill() has been called. the use of atomic avoids the
@@ -263,7 +255,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 // up CPU time, perhaps causing later tests to fail and generating
 // confusing debug output. any goroutine with a long-running loop
 // should call killed() to check whether it should stop.
-//
 func (rf *Raft) Kill() {
 	// DebugPretty(dInfo, "S%d Offline T:%d", rf.me, rf.GetTerm())
 	atomic.StoreInt32(&rf.dead, 1)
@@ -298,16 +289,14 @@ func (rf *Raft) ticker() {
 // Raft represent raft
 func (rf *Raft) StartFollower() {
 	elt := randomizedElectionTimeout()
-	// this is should be delete, only to print some atomic values for ds debug
-	debugFn := func() error {
+
+	rf.funcWrapperWithStateProtect(func() error {
 		DebugPretty(dTimer, "S%d I'm follower at T%d, pausing HBT elt:%d termAt:[%v] now:%d", rf.me, rf.currentTerm, elt/time.Millisecond, rf.termAt.UnixMilli(), time.Now().UnixMilli())
 		return nil
-	}
-
-	rf.funcWrapperWithStateProtect(debugFn)
+	})
 
 	for !rf.elapseElectionTimeoutUntil(Follower, elt, func() { rf.switchState(Follower, Candidate, rf.resetElectionTimer) }) {
-		// rf.applyLogEntry()
+		rf.applyLogEntries()
 		time.Sleep(defaultTickerPeriod)
 	}
 
@@ -315,13 +304,13 @@ func (rf *Raft) StartFollower() {
 
 // StartCandidate start an new election in its own term
 func (rf *Raft) StartCandidate() {
+	elt := randomizedElectionTimeout()
+
 	rf.funcWrapperWithStateProtect(func() error {
 		DebugPretty(dTimer, "S%d Convert to Candidate -termAt:%d now:%d", rf.me, rf.termAt.UnixMilli(), time.Now().UnixMilli())
+		rf.StartElection()
 		return nil
 	})
-
-	elt := randomizedElectionTimeout()
-	go rf.StartElection()
 
 	for !rf.elapseElectionTimeoutUntil(Candidate, elt, rf.resetElectionTimer) {
 		time.Sleep(defaultTickerPeriod)
@@ -332,45 +321,26 @@ func (rf *Raft) StartCandidate() {
 // StartLeader start an loop worker for issue an appendRPC every heartbeat period until it's not leader anymore
 func (rf *Raft) StartLeader() {
 	rf.funcWrapperWithStateProtect(func() error {
-		DebugPretty(dTimer, "S%d Broadcast - termAt:%d now:%d", rf.me, rf.termAt.UnixMilli(), time.Now().UnixMilli())
+		rf.StartAppendEntries()
 		return nil
 	})
 
-	go rf.StartAppendEntries()
-
 	for !rf.elapseElectionTimeoutUntil(Leader, defaultHeartbeatPeriod, rf.resetElectionTimer) {
+		rf.updateLeaderCommitIndex()
+		rf.applyLogEntries()
 		time.Sleep(defaultTickerPeriod)
 	}
 }
 
 // Raft represent raft
 // true means it can skip current loop, step into next role
-func (rf *Raft) elapseElectionTimeoutUntil(role Role, elt time.Duration, deferFn func(), cfns ...func() bool) bool {
+func (rf *Raft) elapseElectionTimeoutUntil(role Role, elt time.Duration, breakFn func()) bool {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	// if role has chaned, then should jump out loop immediately
-	if rf.role != role {
-		return true
-	}
-
-	condition := func() bool {
-		ret := false
-		for _, fn := range cfns {
-			if fn == nil {
-				continue
-			}
-			if !fn() {
-				return false
-			}
-			ret = true
-		}
-		return ret
-	}
-
-	if time.Now().Sub(rf.termAt)-elt > 0 || condition() {
-		if deferFn != nil {
-			deferFn()
+	if rf.role != role || time.Now().Sub(rf.termAt)-elt > 0 {
+		if breakFn != nil {
+			breakFn()
 		}
 		return true
 	}
@@ -378,7 +348,6 @@ func (rf *Raft) elapseElectionTimeoutUntil(role Role, elt time.Duration, deferFn
 	return false
 }
 
-//
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
 // server's port is peers[me]. all the servers' peers[] arrays
@@ -388,7 +357,6 @@ func (rf *Raft) elapseElectionTimeoutUntil(role Role, elt time.Duration, deferFn
 // tester or service expects Raft to send ApplyMsg messages.
 // Make() must return quickly, so it should start goroutines
 // for any long-running work.
-//
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{}
