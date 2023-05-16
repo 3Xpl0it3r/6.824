@@ -8,20 +8,24 @@ package raft
 // test with the original before submitting.
 //
 
-import "6.824/labgob"
-import "6.824/labrpc"
-import "bytes"
-import "log"
-import "sync"
-import "sync/atomic"
-import "testing"
-import "runtime"
-import "math/rand"
-import crand "crypto/rand"
-import "math/big"
-import "encoding/base64"
-import "time"
-import "fmt"
+import (
+	"bytes"
+	"log"
+	"math/rand"
+	"runtime"
+	"sync"
+	"sync/atomic"
+	"testing"
+
+	"6.824/labgob"
+	"6.824/labrpc"
+
+	crand "crypto/rand"
+	"encoding/base64"
+	"fmt"
+	"math/big"
+	"time"
+)
 
 func randstring(n int) string {
 	b := make([]byte, 2*n)
@@ -267,13 +271,11 @@ func (cfg *config) applierSnap(i int, applyCh chan ApplyMsg) {
 	}
 }
 
-//
 // start or re-start a Raft.
 // if one already exists, "kill" it first.
 // allocate new outgoing port file names, and a new
 // state persister, to isolate previous instance of
 // this server. since we cannot really kill it.
-//
 func (cfg *config) start1(i int, applier func(int, chan ApplyMsg)) {
 	cfg.crash1(i)
 
@@ -358,6 +360,7 @@ func (cfg *config) cleanup() {
 
 // attach server i to the net.
 func (cfg *config) connect(i int) {
+	DebugPretty(dInfo, "S%d -- connect ", i)
 	// fmt.Printf("connect(%d)\n", i)
 
 	cfg.connected[i] = true
@@ -381,6 +384,7 @@ func (cfg *config) connect(i int) {
 
 // detach server i from the net.
 func (cfg *config) disconnect(i int) {
+	DebugPretty(dInfo, "S%d -- disconnect ", i)
 	// fmt.Printf("disconnect(%d)\n", i)
 
 	cfg.connected[i] = false
@@ -422,13 +426,11 @@ func (cfg *config) setlongreordering(longrel bool) {
 	cfg.net.LongReordering(longrel)
 }
 
-//
 // check that one of the connected servers thinks
 // it is the leader, and that no other connected
 // server thinks otherwise.
 //
 // try a few times in case re-elections are needed.
-//
 func (cfg *config) checkOneLeader() int {
 	for iters := 0; iters < 10; iters++ {
 		ms := 450 + (rand.Int63() % 100)
@@ -454,6 +456,7 @@ func (cfg *config) checkOneLeader() int {
 		}
 
 		if len(leaders) != 0 {
+			DebugPretty(dInfo, "S%d CheckOneLeader, I am win", leaders[lastTermWithLeader][0])
 			return leaders[lastTermWithLeader][0]
 		}
 	}
@@ -477,10 +480,8 @@ func (cfg *config) checkTerms() int {
 	return term
 }
 
-//
 // check that none of the connected servers
 // thinks it is the leader.
-//
 func (cfg *config) checkNoLeader() {
 	for i := 0; i < cfg.n; i++ {
 		if cfg.connected[i] {
@@ -560,15 +561,32 @@ func (cfg *config) wait(index int, n int, startTerm int) interface{} {
 // times, in case a leader fails just after Start().
 // if retry==false, calls Start() only once, in order
 // to simplify the early Lab 2B tests.
+func cost1(prevTime time.Time) uint64 {
+	return uint64(time.Now().Sub(prevTime).Milliseconds())
+}
+
 func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 	t0 := time.Now()
+	var rf *Raft
+	var count int = 0
+	defer func() {
+		DebugPretty(dInfo, "S%d --- Complete cfg.one(%v) tryCount: %d - cost %d", rf.me, cmd, count, time.Since(t0)/time.Millisecond)
+		cfg.mu.Lock()
+		for server, logs := range cfg.logs {
+			DebugPretty(dInfo, "S%d CommitLogs: %v", server, logs)
+		}
+		cfg.mu.Unlock()
+	}()
+
 	starts := 0
+	index := -1
+	var nd int
+	var cmd1 interface{}
 	for time.Since(t0).Seconds() < 10 && cfg.checkFinished() == false {
+		count += 1
 		// try all the servers, maybe one is the leader.
-		index := -1
 		for si := 0; si < cfg.n; si++ {
 			starts = (starts + 1) % cfg.n
-			var rf *Raft
 			cfg.mu.Lock()
 			if cfg.connected[starts] {
 				rf = cfg.rafts[starts]
@@ -587,8 +605,10 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 			// somebody claimed to be the leader and to have
 			// submitted our command; wait a while for agreement.
 			t1 := time.Now()
+			anotherCount := 0
+
 			for time.Since(t1).Seconds() < 2 {
-				nd, cmd1 := cfg.nCommitted(index)
+				nd, cmd1 = cfg.nCommitted(index)
 				if nd > 0 && nd >= expectedServers {
 					// committed
 					if cmd1 == cmd {
@@ -597,16 +617,19 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 					}
 				}
 				time.Sleep(20 * time.Millisecond)
+				anotherCount++
 			}
+
 			if retry == false {
-				cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
+				cfg.t.Fatalf("one(%v) failed to reach agreement at Index:%d we expected: %v, actual %d, %v", cmd, index, cmd, nd, cmd1)
 			}
 		} else {
 			time.Sleep(50 * time.Millisecond)
 		}
 	}
 	if cfg.checkFinished() == false {
-		cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
+		cfg.t.Fatalf("one(%v) failed to reach agreement at Index:%d we expected: %v, actual %d, %v", cmd, index, cmd, nd, cmd1)
+		// cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
 	}
 	return -1
 }
